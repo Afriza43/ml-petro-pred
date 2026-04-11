@@ -710,26 +710,48 @@ def build_vsh_linear_feature(df: pd.DataFrame,
 # ══════════════════════════════════════════════════════════════════
 
 
-def apply_target_training_policy(df: pd.DataFrame, target: str) -> tuple[pd.DataFrame, dict]:
+def apply_target_training_policy(df: pd.DataFrame, target: str,
+                                 rules: dict | None = None) -> tuple[pd.DataFrame, dict]:
     """
     Policy khusus per target untuk training/evaluasi.
-    Saat ini:
-    - VSH = 0 dianggap coal marker -> tidak dipakai training/evaluasi umum
-    - SW = 1 tetap dipertahankan
+    Rules (semua default True = aktif):
+    - rule_vsh_drop_zero: buang VSH = 0 dari training (coal marker)
+    - rule_sw_drop_one:   buang SW  = 1 dari training
+    - rule_phie_drop_zero: buang PHIE = 0 dari training
+    Jika rules dict None, default lama dipakai (drop VSH=0 saja).
     """
     df = df.copy()
     info = {
         'drop_vsh_zero_for_training': 0,
+        'drop_sw_one_for_training': 0,
+        'drop_phie_zero_for_training': 0,
         'keep_sw_eq_1': 0,
     }
+    if rules is None:
+        rules = {
+            'rule_vsh_drop_zero': True,
+            'rule_sw_drop_one': False,
+            'rule_phie_drop_zero': False,
+        }
 
     if target == 'VSH' and 'VSH' in df.columns:
-        mask_zero = df['VSH'].notna() & (df['VSH'] == 0)
-        info['drop_vsh_zero_for_training'] = int(mask_zero.sum())
-        df = df.loc[~mask_zero].copy()
+        if rules.get('rule_vsh_drop_zero', True):
+            mask_zero = df['VSH'].notna() & (df['VSH'] == 0)
+            info['drop_vsh_zero_for_training'] = int(mask_zero.sum())
+            df = df.loc[~mask_zero].copy()
 
     if target == 'SW' and 'SW' in df.columns:
         info['keep_sw_eq_1'] = int((df['SW'] == 1).sum())
+        if rules.get('rule_sw_drop_one', False):
+            mask_one = df['SW'].notna() & (df['SW'] == 1)
+            info['drop_sw_one_for_training'] = int(mask_one.sum())
+            df = df.loc[~mask_one].copy()
+
+    if target == 'PHIE' and 'PHIE' in df.columns:
+        if rules.get('rule_phie_drop_zero', False):
+            mask_zero = df['PHIE'].notna() & (df['PHIE'] == 0)
+            info['drop_phie_zero_for_training'] = int(mask_zero.sum())
+            df = df.loc[~mask_zero].copy()
 
     return df, info
 
@@ -1008,7 +1030,7 @@ def compute_zone_metrics(df_te, targets, zone_col='ZONE'):
 # ══════════════════════════════════════════════════════════════════
 # TRAINING
 # ══════════════════════════════════════════════════════════════════
-def run_training(combined, test_wells, target_feats, opts, params, model_name='lightgbm', training_mode='standard', sample_weight=None):
+def run_training(combined, test_wells, target_feats, opts, params, model_name='lightgbm', training_mode='standard', sample_weight=None, target_rules=None):
     """
     Training per target dengan propagated feature non-leaky.
     - Preprocessing params (LabelEncoder, VSH_LINEAR) dihitung dari TRAIN only.
@@ -1146,13 +1168,24 @@ def run_training(combined, test_wells, target_feats, opts, params, model_name='l
 
         clean = df_tr.dropna(subset=feat_tr + [tgt]).copy()
 
-        # Policy khusus per target
-        clean, tgt_policy = apply_target_training_policy(clean, tgt)
+        # Policy khusus per target (rules bisa ditoggle user)
+        clean, tgt_policy = apply_target_training_policy(
+            clean, tgt, rules=target_rules)
 
         if tgt == 'VSH' and tgt_policy.get('drop_vsh_zero_for_training', 0) > 0:
             st.info(
-                f"ℹ VSH policy: {tgt_policy['drop_vsh_zero_for_training']:,} baris dengan VSH = 0 "
-                f"tidak dipakai untuk training/evaluasi umum (diasumsikan coal)."
+                f"ℹ VSH rule aktif: {tgt_policy['drop_vsh_zero_for_training']:,} baris dengan VSH = 0 "
+                f"tidak dipakai training (coal marker)."
+            )
+        if tgt == 'SW' and tgt_policy.get('drop_sw_one_for_training', 0) > 0:
+            st.info(
+                f"ℹ SW rule aktif: {tgt_policy['drop_sw_one_for_training']:,} baris dengan SW = 1 "
+                f"tidak dipakai training."
+            )
+        if tgt == 'PHIE' and tgt_policy.get('drop_phie_zero_for_training', 0) > 0:
+            st.info(
+                f"ℹ PHIE rule aktif: {tgt_policy['drop_phie_zero_for_training']:,} baris dengan PHIE = 0 "
+                f"tidak dipakai training."
             )
 
         use_hybrid_vsh = (
@@ -1254,7 +1287,20 @@ def run_training(combined, test_wells, target_feats, opts, params, model_name='l
 # ══════════════════════════════════════════════════════════════════
 
 
-def plot_log(df, targets, well_name):
+def plot_log(df, targets, well_name, zone_filter=None):
+    """zone_filter: None atau list nama zona untuk dibatasi. Rows di luar
+    zona yang dipilih akan di-NaN-kan (tetap jaga sumbu depth)."""
+    df = df.copy()
+    if zone_filter is not None and len(zone_filter) > 0 and 'ZONE' in df.columns:
+        zcol = df['ZONE'].fillna('UNKNOWN').astype(str)
+        keep = zcol.isin([str(z) for z in zone_filter])
+        # NaN-kan kolom log & target di luar zona agar sumbu depth tetap utuh
+        cols_null = [c for c in ['GR', 'GR_NORM', 'RHOB', 'NPHI', 'RT']
+                     if c in df.columns]
+        for t in targets:
+            cols_null += [c for c in [t, f'{t}_PRED'] if c in df.columns]
+        for c in cols_null:
+            df.loc[~keep, c] = np.nan
     pred_tgts = [t for t in targets if f'{t}_PRED' in df.columns]
     nc = 3+len(pred_tgts)
     widths = [1, 1.1, 0.85]+[1.2]*len(pred_tgts)
@@ -1338,7 +1384,11 @@ def plot_log(df, targets, well_name):
     return fig
 
 
-def plot_scatter(df, targets):
+def plot_scatter(df, targets, zone_filter=None):
+    """zone_filter: None atau list nama zona untuk dibatasi."""
+    if zone_filter is not None and len(zone_filter) > 0 and 'ZONE' in df.columns:
+        zcol = df['ZONE'].fillna('UNKNOWN').astype(str)
+        df = df[zcol.isin([str(z) for z in zone_filter])].copy()
     tgts = [
         t for t in targets if t in df.columns and f'{t}_PRED' in df.columns]
     if not tgts:
@@ -2135,6 +2185,26 @@ def _run_multi_structure_page():
             help="Berikan bobot lebih tinggi pada struktur dengan data lebih sedikit "
                  "agar kontribusi setiap struktur seimbang saat training.")
 
+        # ── Target Rules ──
+        with st.expander("📋 Target Rules (Training)", expanded=False):
+            st.caption(
+                "Rule membatasi data training per target. "
+                "Nonaktifkan jika ingin model tetap belajar dari nilai ekstrem.")
+            ms_rule_vsh = st.checkbox(
+                "Buang VSH = 0 (coal marker)",
+                value=True, key='ms_rule_vsh_drop_zero')
+            ms_rule_sw = st.checkbox(
+                "Buang SW = 1",
+                value=False, key='ms_rule_sw_drop_one')
+            ms_rule_phie = st.checkbox(
+                "Buang PHIE = 0",
+                value=False, key='ms_rule_phie_drop_zero')
+        ms_target_rules = {
+            'rule_vsh_drop_zero': ms_rule_vsh,
+            'rule_sw_drop_one': ms_rule_sw,
+            'rule_phie_drop_zero': ms_rule_phie,
+        }
+
         # ── Train Button ──
         st.markdown("---")
         ms_can_train = (ms_combined is not None and len(ms_combined) > 0
@@ -2181,7 +2251,8 @@ def _run_multi_structure_page():
                     'hybrid_vsh_linear_residual'
                     if ms_training_mode == 'Hybrid Residual VSH (Linear)'
                     else 'standard'),
-                sample_weight=_ms_sw)
+                sample_weight=_ms_sw,
+                target_rules=ms_target_rules)
 
         if ms_res is not None:
             SS.update(
@@ -2445,8 +2516,22 @@ def _run_multi_structure_page():
                 display_name = (f"{sel_w.split('::')[0]} / "
                                 f"{sel_w.split('::')[-1]}"
                                 if '::' in sel_w else sel_w)
+
+                # Zone filter
+                zf_ms = None
+                if 'ZONE' in df_w.columns:
+                    _zs = sorted([z for z in df_w['ZONE'].dropna().unique()
+                                  if str(z).upper()
+                                  not in ('UNKNOWN', 'NAN', '', 'NONE')])
+                    if _zs:
+                        sel_zs = st.multiselect(
+                            "Filter Zone (kosong = semua)",
+                            _zs, default=[], key='ms_log_zone_filter')
+                        if sel_zs:
+                            zf_ms = sel_zs
                 st.plotly_chart(
-                    plot_log(df_w, ms_cfg['targets'], display_name),
+                    plot_log(df_w, ms_cfg['targets'], display_name,
+                             zone_filter=zf_ms),
                     use_container_width=True)
 
         # ── Scatter ──
@@ -2466,7 +2551,21 @@ def _run_multi_structure_page():
                         if '::' in x else x),
                     key='ms_sc_wells')
                 df_sc = df_te[df_te['WELL_NAME'].isin(sel_sw)]
-                fig_sc = plot_scatter(df_sc, ms_cfg['targets'])
+
+                # Zone filter
+                zf_ms_sc = None
+                if 'ZONE' in df_sc.columns:
+                    _zs_sc = sorted([z for z in df_sc['ZONE'].dropna().unique()
+                                     if str(z).upper()
+                                     not in ('UNKNOWN', 'NAN', '', 'NONE')])
+                    if _zs_sc:
+                        sel_zs_sc = st.multiselect(
+                            "Filter Zone (kosong = semua)",
+                            _zs_sc, default=[], key='ms_sc_zone_filter')
+                        if sel_zs_sc:
+                            zf_ms_sc = sel_zs_sc
+                fig_sc = plot_scatter(df_sc, ms_cfg['targets'],
+                                      zone_filter=zf_ms_sc)
                 if fig_sc:
                     st.plotly_chart(fig_sc, use_container_width=True)
 
@@ -2772,8 +2871,24 @@ def _run_multi_structure_page():
                         parts = sel_tw.split('::', 1)
                         disp = (f"{parts[0]} / {parts[1]}"
                                 if len(parts) == 2 else sel_tw)
+
+                        # Zone filter
+                        zf_mtst = None
+                        if 'ZONE' in df_filt.columns:
+                            _zst = sorted([
+                                z for z in df_filt['ZONE'].dropna().unique()
+                                if str(z).upper()
+                                not in ('UNKNOWN', 'NAN', '', 'NONE')])
+                            if _zst:
+                                sel_zst = st.multiselect(
+                                    "Filter Zone (kosong = semua)",
+                                    _zst, default=[],
+                                    key='mst_log_zone_filter')
+                                if sel_zst:
+                                    zf_mtst = sel_zst
                         st.plotly_chart(
-                            plot_log(df_filt, targets, disp),
+                            plot_log(df_filt, targets, disp,
+                                     zone_filter=zf_mtst),
                             use_container_width=True)
 
                 # Scatter
@@ -2789,7 +2904,23 @@ def _run_multi_structure_page():
                         df_sc = pd.concat(
                             [_mtr[w] for w in sel_sc if w in _mtr],
                             ignore_index=True)
-                        fig_sc = plot_scatter(df_sc, targets)
+
+                        # Zone filter
+                        zf_mtsc = None
+                        if 'ZONE' in df_sc.columns:
+                            _zsc = sorted([
+                                z for z in df_sc['ZONE'].dropna().unique()
+                                if str(z).upper()
+                                not in ('UNKNOWN', 'NAN', '', 'NONE')])
+                            if _zsc:
+                                sel_zsc = st.multiselect(
+                                    "Filter Zone (kosong = semua)",
+                                    _zsc, default=[],
+                                    key='mst_sc_zone_filter')
+                                if sel_zsc:
+                                    zf_mtsc = sel_zsc
+                        fig_sc = plot_scatter(df_sc, targets,
+                                              zone_filter=zf_mtsc)
                         if fig_sc:
                             st.plotly_chart(fig_sc, use_container_width=True)
 
@@ -3274,6 +3405,26 @@ with st.sidebar:
                             verbose=0)
         model_name = 'catboost'
 
+    # ── Target Rules (aturan filter per target saat training) ──
+    with st.expander("📋 Target Rules (Training)", expanded=False):
+        st.caption(
+            "Rule membatasi data training per target. "
+            "Nonaktifkan jika ingin model tetap belajar dari nilai ekstrem.")
+        rule_vsh_drop_zero = st.checkbox(
+            "Buang VSH = 0 (coal marker)",
+            value=True, key='rule_vsh_drop_zero')
+        rule_sw_drop_one = st.checkbox(
+            "Buang SW = 1",
+            value=False, key='rule_sw_drop_one')
+        rule_phie_drop_zero = st.checkbox(
+            "Buang PHIE = 0",
+            value=False, key='rule_phie_drop_zero')
+    target_rules = {
+        'rule_vsh_drop_zero': rule_vsh_drop_zero,
+        'rule_sw_drop_one': rule_sw_drop_one,
+        'rule_phie_drop_zero': rule_phie_drop_zero,
+    }
+
     st.markdown("---")
     can_train = (combined is not None and len(combined) > 0
                  and len(test_wells) > 0
@@ -3304,7 +3455,8 @@ if train_btn and can_train:
         res = run_training(
             combined,
             test_wells, target_feats, opts, model_params, model_name=model_name,
-            training_mode='hybrid_vsh_linear_residual' if training_mode == 'Hybrid Residual VSH (Linear)' else 'standard')
+            training_mode='hybrid_vsh_linear_residual' if training_mode == 'Hybrid Residual VSH (Linear)' else 'standard',
+            target_rules=target_rules)
 
     # ✅ Cek apakah training berhasil (bukan None)
     if res is not None:
@@ -3549,8 +3701,22 @@ if st.session_state['trained'] and st.session_state['results']:
             with c2:
                 d1 = st.number_input("Sampai (m)", dmin, dmax, dmax, key='d1')
             df_w = df_w[(df_w['DEPTH'] >= d0) & (df_w['DEPTH'] <= d1)]
-            st.plotly_chart(plot_log(df_w, cfg['targets'], sel_w),
-                            use_container_width=True)
+
+            # Zone filter
+            zf_log = None
+            if 'ZONE' in df_w.columns:
+                _zones = sorted([z for z in df_w['ZONE'].dropna().unique()
+                                 if str(z).upper()
+                                 not in ('UNKNOWN', 'NAN', '', 'NONE')])
+                if _zones:
+                    sel_zones = st.multiselect(
+                        "Filter Zone (kosong = semua)",
+                        _zones, default=[], key='log_zone_filter')
+                    if sel_zones:
+                        zf_log = sel_zones
+            st.plotly_chart(
+                plot_log(df_w, cfg['targets'], sel_w, zone_filter=zf_log),
+                use_container_width=True)
 
     # ── TAB 3 ──
     with tab3:
@@ -3563,7 +3729,20 @@ if st.session_state['trained'] and st.session_state['results']:
         else:
             sel_sw = st.multiselect("Filter Sumur", sc_wells, default=sc_wells)
             df_sc = df_te[df_te['WELL_NAME'].isin(sel_sw)]
-            fig_sc = plot_scatter(df_sc, cfg['targets'])
+
+            # Zone filter
+            zf_sc = None
+            if 'ZONE' in df_sc.columns:
+                _zones_sc = sorted([z for z in df_sc['ZONE'].dropna().unique()
+                                    if str(z).upper()
+                                    not in ('UNKNOWN', 'NAN', '', 'NONE')])
+                if _zones_sc:
+                    sel_zones_sc = st.multiselect(
+                        "Filter Zone (kosong = semua)",
+                        _zones_sc, default=[], key='sc_zone_filter')
+                    if sel_zones_sc:
+                        zf_sc = sel_zones_sc
+            fig_sc = plot_scatter(df_sc, cfg['targets'], zone_filter=zf_sc)
             if fig_sc:
                 st.plotly_chart(fig_sc, use_container_width=True)
 
@@ -3841,8 +4020,23 @@ if st.session_state['trained'] and st.session_state['results']:
                             "Sampai (m)", dmin_t, dmax_t, dmax_t, key='td1')
                     df_tw_filt = df_tw[(df_tw['DEPTH'] >= dt0)
                                        & (df_tw['DEPTH'] <= dt1)]
+
+                    # Zone filter
+                    zf_tst = None
+                    if 'ZONE' in df_tw_filt.columns:
+                        _ztst = sorted([
+                            z for z in df_tw_filt['ZONE'].dropna().unique()
+                            if str(z).upper()
+                            not in ('UNKNOWN', 'NAN', '', 'NONE')])
+                        if _ztst:
+                            sel_ztst = st.multiselect(
+                                "Filter Zone (kosong = semua)",
+                                _ztst, default=[], key='test_log_zone_filter')
+                            if sel_ztst:
+                                zf_tst = sel_ztst
                     st.plotly_chart(
-                        plot_log(df_tw_filt, targets, sel_test_w),
+                        plot_log(df_tw_filt, targets, sel_test_w,
+                                 zone_filter=zf_tst),
                         use_container_width=True)
 
             # Crossplot
@@ -3854,7 +4048,23 @@ if st.session_state['trained'] and st.session_state['results']:
                     df_sc_all = pd.concat(
                         [_tr[w] for w in sel_test_sc if w in _tr],
                         ignore_index=True)
-                    fig_sc_test = plot_scatter(df_sc_all, targets)
+
+                    # Zone filter
+                    zf_tst_sc = None
+                    if 'ZONE' in df_sc_all.columns:
+                        _ztstsc = sorted([
+                            z for z in df_sc_all['ZONE'].dropna().unique()
+                            if str(z).upper()
+                            not in ('UNKNOWN', 'NAN', '', 'NONE')])
+                        if _ztstsc:
+                            sel_ztstsc = st.multiselect(
+                                "Filter Zone (kosong = semua)",
+                                _ztstsc, default=[],
+                                key='test_sc_zone_filter')
+                            if sel_ztstsc:
+                                zf_tst_sc = sel_ztstsc
+                    fig_sc_test = plot_scatter(df_sc_all, targets,
+                                               zone_filter=zf_tst_sc)
                     if fig_sc_test:
                         st.plotly_chart(fig_sc_test, use_container_width=True)
 
