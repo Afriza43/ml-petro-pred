@@ -1,0 +1,271 @@
+PROGRAM: SW_SIM  Water Saturation using Modified Simandoux method
+
+/*
+/*History:   Aug 1995 (SGC/WWC) Initial coding for geolog6
+/*           Feb 1997 (WWC)     Condition on VOL_XWAT for missing RXO
+/*           Mar 1997 (WWC)     Change RSH to RT_SH
+/*           Jul 1998 (WWC)     Allow N to vary
+/*           Jul 1998 (WWC)     Include Schlumberger modification option
+/*           Jul 1998 (WWC)     Change lower SW limit from 0 to SWE_IRR
+/*           Feb 1999 (WWC)     Increase upper validation for salinities
+/*           Aug 2009 (WWC)     Add option for variable "M"
+/*           Oct 2015 (TOS)     Allow option to input RW as a log
+/*           Sep-2016 (TOS)     Kennedy salinity modification added
+/*
+/*           COPYRIGHT (1995) - PARADIGM GEOPHYSICAL PTY LTD
+/*
+/*--------------------------------------------------------------------------
+/*start_doc
+/*
+/*SW_SIM calculates water saturation using either the Modified Simandoux method of Bardon and Pied or the Schlumberger modification. OPT_SIM selects which option will be used. SW_SIM uses effective porosity.
+/*
+/*The Modified Simandoux method differs from the original Simandoux method in the multiplication of the shale conductivity term by the water saturation value:
+/*
+/*    1/RT = ((SW ** N) / (FF * RW)) + (VSH * SW / RT_SH)
+/*
+/*where FF = A / (PHIE ** M)
+/*
+/*The Schlumberger modification to the above equation is as follows:
+/*
+/*    1/RT = ((SW ** N) / (FF * RW * (1-VSH))) + ((VSH**C) * SW / RT_SH)
+/*
+/*    where FF = A / (PHIE ** M)
+/*
+/*In this method the saturation exponent N is normally set equal to 2 (but can be varied at the user's discretion).
+/*
+/*Both SWE and SXOE are calculated and limited to be between effective irreducible water saturation (SWE_IRR; defaulted to 0) and 1. SWE_SIM is unlimited.
+/*
+/*For effective porosity less than 0.005, all saturations are set to 1.
+/*
+/*Two volumes are calculated - VOL_UWAT and VOL_XWAT. These are the volumes of water in the unflushed and flushed zones respectively. The difference in these volumes is the volume of moved hydrocarbons. The volumes are calculated as:
+/*
+/*    VOL_UWAT = SWE * PHIE
+/*
+/*    VOL_XWAT = SXOE * PHIE
+/*
+/*If there is no RXO log, then VOL_XWAT is made equal to VOL_UWAT.
+/*
+/*Worthington classifies it as a type 2 water saturation equation.
+/*
+/*Rw is calculated at formation temperature from chosen method:
+/*1) Using a measured resistivity on a formation water sample, adjusted to formation temperature by the Arp's formula:
+/*
+/*         RW = RWS * ( RWT + 21.5 ) / ( FTEMP + 21.5 )
+/*
+/*2) Converting a formation water salinity using the formulas from Western Atlas Charts (1994) page 27.
+/*Note that for salinity calculations there are two options, use Bateman Konen is preferred for lower salinities (higher resistivities), while at higher salinities (lower resistivites) the Kennedy equation is preferred.
+/*The switch from Bateman Konen to the Kennedy method is made at a salinity of 39161 or resistivity of 0.162206339.
+/*For the Kennedy method, the maximum allowable salinity is 275,000 ppm and minimum resistivity at 75F is 0.412 ohmm
+/*
+/*References:
+/*Simandoux, P. "Measures Dielectriques en Milieu Poreaux, Application a Mesure des Saturations en Eau, Etude du Comportement des Massifs Argileaux",
+/*Revue de l'Institut Francais du Petrole, Issue Supplementaire, pp. 193-215, 1963. Translated in "Shaly Sand" SWPLA Reprint Volume, 1982.
+/*
+/*Bardon, C. and Pied, B. "Formation Water Saturation in Shaly Sands",
+/*Transactions SPWLA 10th Annual Logging Symposium, Paper Z, 1969.
+/*
+/*end_doc
+
+INPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       OPT_SIM                ALPHA*8   /* Option for Mod or Schlum eqn
+       A                                /* Tortuosity constant
+       OPT_M                  ALPHA*8   /* Option for cementation exponent
+       OPT_SAL                ALPHA*16  /* Option for Rw salinity conversion
+       M                                /* Cementation factor
+       N                                /* Saturation exponent
+       C                                /* VSH exponent
+       OPT_RW                 ALPHA*8   /* Option for RW
+       RWS                    ohmm      /* Resistivity of formation water
+       RWT                    degc      /* Temperature of RWS value
+       SALW                   ppm       /* Salinity of formation water
+       MUDBASE                ALPHA*8   /* Type of mud base
+       RT_SH                  ohmm      /* Shale resistivity
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       RT                     ohmm      /* True formation resistivity
+       RXO                    ohmm      /* Flushed zone resistivity
+       PHIE                   v/v       /* Limited effective porosity
+       M_EXP                            /* Variable cementation exponent
+       VSH                    v/v       /* Limited volume of shale
+       FTEMP                  degc      /* Formation temperature
+       RMF                    ohmm      /* Mud filtrate resistivity
+       SWE_IRR                v/v       /* SWE irreducible
+       RW                     ohmm      /* Log of formation water resistivity
+
+LOCAL
+       rwtemp                           /* Temporary resistivity at FTEMP
+       rw75                             /* Temporary resistivity 23.9 degc
+       mtemp                            /* Temporary cementation exponent
+       ff                               /* Formation factor
+       g1                               /* Function temporaries
+       g2                               /* Function temporaries
+       g3                               /* Function temporaries
+       iter                             /* Iterations in Newton-Raphson
+       sat                              /* Saturation by Newton_Raphson
+       fx                               /* Function value
+       fxp                              /* Function gradient value
+       del                              /* Sat'n update by Newton-Raphson
+
+OUTPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       OPT_SIM                ALPHA*8   /* Option for Mod or Schlum eqn
+       A                                /* Tortuosity constant
+       OPT_M                  ALPHA*8   /* Option for cementation exponent
+       OPT_SAL                ALPHA*16  /* Option for Rw salinity conversion
+       M                                /* Cementation factor
+       N                                /* Saturation exponent
+       C                                /* VSH exponent
+       OPT_RW                 ALPHA*8   /* Option for RW
+       RWS                    ohmm      /* Resistivity of formation water
+       RWT                    degc      /* Temperature of RWS value
+       SALW                   ppm       /* Salinity of formation water
+       MUDBASE                ALPHA*8   /* Type of mud base
+       RT_SH                  ohmm      /* Shale resistivity
+       OPT_SW                 ALPHA*8   /* Option for SW
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       SWE_SIM                v/v       /* SWE from Modified Simandoux
+       SWE                    v/v       /* Limited unflushed zone eff sat'n
+       SXOE                   v/v       /* Limited flushed zone eff sat'n
+       VOL_UWAT               v/v       /* Unflushed zone volume of water
+       VOL_XWAT               v/v       /* Flushed zone volume of water
+
+START:
+
+dowhile GET_FRAME ()
+
+  /* Assign saturation method
+  if ( OPT_SIM == 'MODIFIED' ) then
+    OPT_SW = 'SIM_MOD'
+  else
+    OPT_SW = 'SIM_SCHL'
+  endif
+
+  /* Check for low effective porosity
+  if ( PHIE < 0.005 ) then
+    SWE      = 1.0
+    VOL_UWAT = PHIE
+    SWE_SIM  = 1.0
+    SXOE     = 1.0
+    VOL_XWAT = PHIE
+    goto END_MODEL
+  endif
+
+  /* Calculate Rw
+
+  /* Rw from formation sample measurement
+  if ( OPT_RW == 'MEASURED' ) then
+    rwtemp = RWS * ( RWT + 21.5 ) / ( FTEMP + 21.5 )
+  /* Rw input from log
+  elseif ( OPT_RW == 'LOG' ) then
+    rwtemp = RW
+
+  /* Rw from salinity
+  elseif ( OPT_RW == 'SALINITY' & OPT_SAL == 'KENNEDY_MOD' & SALW > 39161)  then
+          if (SALW <= 275000) then
+              rw75 =1/(24.30853-0.0364*((SALW/10000)-29.46518957)-~
+              0.02922*((SALW/10000)-29.46518957)**2)
+              rwtemp = rw75 * ( 75 + 6.77 ) / ( ( 1.8 * fTEMP + 32 ) + 6.77 )
+          else
+              rw75 = 0.0412
+              rwtemp = rw75 * ( 75 + 6.77 ) / ( ( 1.8 * fTEMP + 32 ) + 6.77 )
+          endif
+      else
+        rw75   = 0.0123 + ( 3647.5 / SALW**0.955 )
+        rwtemp = rw75 * ( 23.9 + 21.5 ) / ( FTEMP + 21.5 )
+
+  endif
+
+
+  /* Choose constant or variable cementation exponent
+  if ( OPT_M == 'CONSTANT' ) then
+    if ( M == missing ) then
+      DISPLAY_ERROR ( 'Must supply value for interval parameter M' )
+    else
+      mtemp = M
+    endif
+  elseif ( M_EXP == missing ) then
+    SWE_SIM  = missing
+    SWE      = missing
+    SXOE     = missing
+    VOL_UWAT = missing
+    VOL_XWAT = missing
+    DISPLAY_MESSAGE ( 'M_EXP log has missing value' )
+    goto END_MODEL
+  else
+    mtemp = M_EXP
+  endif
+
+  /* Calculate formation factor
+  ff = A / PHIE**mtemp
+
+  /* Calculate SWE
+  if ( OPT_SW == 'SIM_MOD' ) then
+    g1 = 1 / ( ff * rwtemp )
+    g2 = VSH / RT_SH
+    g3 = - 1 / RT
+  else
+    g1 = 1 / ( ff * rwtemp * ( 1 - VSH ))
+    g2 = ( VSH ** C ) / RT_SH
+    g3 = - 1 / RT
+  endif
+  perform CALC_SW
+  SWE_SIM  = sat
+
+  /* Limit result
+  SWE      = LIMIT ( sat, SWE_IRR, 1 )
+  VOL_UWAT = PHIE * SWE
+
+  /* Calculate SXOE
+  if (RXO <> MISSING) then
+    if ( OPT_SW == 'SIM_MOD' ) then
+      g1 = 1 / ( ff * RMF )
+      g2 = VSH / RT_SH
+      g3 = -1 / RXO
+    else
+      g1 = 1 / ( ff * RMF * ( 1 - VSH ))
+      g2 = ( VSH ** C ) / RT_SH
+      g3 = - 1 / RXO
+    endif
+    perform CALC_SW
+
+    /* Limit result
+    SXOE     = LIMIT ( sat, SWE_IRR, 1 )
+    VOL_XWAT = PHIE * SXOE
+  else
+    SXOE = MISSING
+    VOL_XWAT = VOL_UWAT
+  endif
+
+  END_MODEL:
+
+  /* Store answers
+  call PUT_FRAME ()
+
+enddo
+
+end
+
+/* Calculate saturations by Newton-Raphson iteration
+CALC_SW:
+iter = 0
+sat  = 0.5
+for iter = 1 to 20 by 1 do
+  fx = ( g1 * sat ** N ) + ( g2 * sat ) + g3
+  fxp = N * g1 * sat ** ( N - 1 ) + g2
+  del = fx / fxp
+  sat = sat - del
+  sat = MAX ( 0 , sat )
+  if ( ABS ( del ) < 0.00001 ) then
+    return
+  endif
+endfor
+sat  = MISSING
+return

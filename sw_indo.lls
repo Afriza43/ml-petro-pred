@@ -1,0 +1,234 @@
+PROGRAM: SW_INDO  Water Saturation using Indonesia formula
+
+/*
+/*History:   Sep 1995 (SGC/WWC) Initial coding for geolog6
+/*           Mar 1996 (SGC/WWC) Correct SIMPLE method to exponentiate
+/*                                VSH by 2
+/*           Mar 1996 (SGC/WWC) Add variable saturation exponent N
+/*           Feb 1997 (WWC)     Condition for VOL_XWAT for missing RXO
+/*           Mar 1997 (WWC)     Change RSH to RT_SH
+/*           Jul 1998 (WWC)     Change lower SW limit from 0 to SWE_IRR
+/*           Feb 1999 (WWC)     Increase upper validation for salinities
+/*           Nov 2004 (WWC)     Allow variable m
+/*           Oct 2015 (TOS)     Allow option to input RW as a log
+/*           Nov 2015 (TOS)     Allow option for Kennedy method for salinity
+/*
+/*           COPYRIGHT (1995) - PARADIGM GEOTECHNOLOGY BV
+/*
+/*--------------------------------------------------------------------------
+/*start_doc
+/*
+/*SW_INDO calculates water saturation using the Indonesia formula:
+/*
+/*1/RT=(v/RT_SH+PHIE**m/(a*RW)+2*SQRT(v*PHIE**m/(a*RW*RT_SH)))*SW**N
+/*
+/*where v = VSH**D
+/*
+/*There are three different varieties of the Indonesia formula, identified by the option paramater
+/*OPT_INDO, which defines the value taken by "D":
+/*FULL - full implementation of Poupon and Leveaux, with VSH exponentiated by ( 2 - VSH )
+/*SIMPLE - the simplified method of Poupon and Leveaux, with VSH exponentiated by 2
+/*TAR_SAND - the implementation of Woodhouse for use in tar sands, with  VSH exponentiated by (2 - 2*VSH)
+/*
+/*In this formula the saturation exponent N is set by the user.
+/*
+/*Both SWE and SXOE are calculated and limited to be between effective irreducible water saturation (SWE_IRR; defaulted to 0) and 1. SWE_INDO is unlimited.
+/*
+/*For effective porosity less than 0.005, all saturations are set to 1.
+/*
+/*Two volumes are calculated - VOL_UWAT and VOL_XWAT. These are the volumes of water in the unflushed and flushed zones respectively. The difference in these volumes is the volume of moved hydrocarbons. The volumes are calculated as:
+/*
+/*    VOL_UWAT = SWE * PHIE
+/*
+/*    VOL_XWAT = SXOE * PHIE
+/*
+/*If there is no RXO log, then VOL_XWAT is made equal to VOL_UWAT.
+/*
+/*Worthington classifies it as a type 4 water saturation equation, and fixes the saturation exponent N at a value of 2, unlike the original formulae.
+/*
+/*Rw is calculated at formation temperature from chosen method:
+/*1) Using a measured resistivity on a formation water sample, adjusted to formation temperature by the Arp's formula:
+/*
+/*         RW = RWS * ( RWT + 21.5 ) / ( FTEMP + 21.5 )
+/*
+/*2) Converting a formation water salinity using the formulas from Western Atlas Charts (1994) page 27.
+/*Note that for salinity calculations there are two options, use Bateman Konen is preferred for lower salinities (higher resistivities), while at higher salinities (lower resistivites) the Kennedy equation is preferred.
+/*The switch from Bateman Konen to the Kennedy method is made at a salinity of 39161 or resistivity of 0.162206339.
+/*For the Kennedy method, the maximum allowable salinity is 275,000 ppm and minimum resistivity at 75F is 0.412 ohmm.
+/*
+/*
+/*References:
+/*Poupon, A. and Leveaux, J. "Evaluation of Water Saturations in Shaly Formations",
+/*Transactions SPWLA 12th Annual Logging Symposium, Paper O, 1971.
+/*
+/*Woodhouse, R. "Athabasca Tar Sand Reservoir Properties Derived from Cores and Logs",
+/*Transactions SPWLA 17th Annual Logging Symposium, Paper T, 1976.
+/*
+/*end_doc
+
+INPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       OPT_INDO               ALPHA*8   /* Option for Indonesia VSH formula
+       A                                /* Tortuosity constant
+       OPT_M                  ALPHA*8   /* Option for cementation exponent
+       OPT_SAL                ALPHA*16  /* Option for salinity method
+       M                                /* Cementation factor
+       N                                /* Saturation exponent
+       OPT_RW                 ALPHA*8   /* Option for RW
+       RWS                    ohmm      /* Resistivity of formation water
+       RWT                    degc      /* Temperature of RWS value
+       SALW                   ppm       /* Salinity of formation water
+       RT_SH                  ohmm      /* Shale resistivity
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       RT                     ohmm      /* True formation resistivity
+       RXO                    ohmm      /* Flushed zone resistivity
+       PHIE                   v/v       /* Limited effective porosity
+       M_EXP                            /* Variable cementation Factor
+       VSH                    v/v       /* Limited volume of shale
+       FTEMP                  degc      /* Formation temperature
+       RMF                    ohmm      /* Mud filtrate resistivity
+       RW                     ohmm      /* Log of formation water resistivity
+       SWE_IRR                v/v       /* SWE irreducible
+
+LOCAL
+       rwtemp                           /* Temporary resistivity at FTEMP
+       rw75                             /* Temporary resistivity 23.9 degc
+       mtemp                            /* Temporary cementation exponent
+       ff                               /* Formation factor
+       f1                               /* Function temporaries
+       f2                               /* Function temporaries
+       f3                               /* Function temporaries
+       v                                /* Shale term
+
+OUTPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       OPT_INDO               ALPHA*8   /* Option for Indonesia VSH formula
+       A                                /* Tortuosity constant
+       OPT_M                  ALPHA*8   /* Option for cementation exponent
+       OPT_SAL                ALPHA*16  /* Option for salinity method
+       M                                /* Cementation factor
+       N                                /* Saturation exponent
+       OPT_RW                 ALPHA*8   /* Option for RW
+       RWS                    ohmm      /* Resistivity of formation water
+       RWT                    degc      /* Temperature of RWS value
+       SALW                   ppm       /* Salinity of formation water
+       RT_SH                  ohmm      /* Shale resistivity
+       OPT_SW                 ALPHA*8   /* Option for SW
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       SWE_INDO               v/v       /* SWE from Indonesia
+       SWE                    v/v       /* Limited unflushed zone eff sat'n
+       SXOE                   v/v       /* Limited flushed zone eff sat'n
+       VOL_UWAT               v/v       /* Unflushed zone volume of water
+       VOL_XWAT               v/v       /* Flushed zone volume of water
+
+START:
+
+dowhile GET_FRAME ()
+
+  /* Assign saturation method and calculate shale term
+  if ( OPT_INDO == 'FULL' ) then
+    OPT_SW = 'INDO_FUL'
+    v      = VSH ** ( 2 - VSH )
+  elseif ( OPT_INDO == 'SIMPLE' ) then
+    OPT_SW = 'INDO_SIM'
+    v      = VSH ** 2
+  elseif ( OPT_INDO == 'TAR_SAND' ) then
+    OPT_SW = 'INDO_TAR'
+    v      = VSH ** ( 2 - 2*VSH )
+  endif
+
+  /* Check for low effective porosity
+  if ( PHIE < 0.005 ) then
+    SWE      = 1.0
+    SWE_INDO = 1.0
+    VOL_UWAT = PHIE
+    SXOE     = 1.0
+    VOL_XWAT = PHIE
+    goto END_MODEL
+  endif
+
+  /* Calculate Rw
+
+  /* Rw from formation sample measurement
+  if ( OPT_RW == 'MEASURED' ) then
+    rwtemp = RWS * ( RWT + 21.5 ) / ( FTEMP + 21.5 )
+  /* Rw input from log
+  elseif ( OPT_RW == 'LOG' ) then
+    rwtemp = RW
+
+  /* Rw from salinity
+  elseif ( OPT_RW == 'SALINITY' & OPT_SAL == 'KENNEDY_MOD' & SALW > 39161)  then
+          if (SALW <= 275000) then
+              rw75 =1/(24.30853-0.0364*((SALW/10000)-29.46518957)-~
+              0.02922*((SALW/10000)-29.46518957)**2)
+              rwtemp = rw75 * ( 75 + 6.77 ) / ( ( 1.8 * fTEMP + 32 ) + 6.77 )
+          else
+              rw75 = 0.0412
+              rwtemp = rw75 * ( 75 + 6.77 ) / ( ( 1.8 * fTEMP + 32 ) + 6.77 )
+          endif
+      else
+        rw75   = 0.0123 + ( 3647.5 / SALW**0.955 )
+        rwtemp = rw75 * ( 23.9 + 21.5 ) / ( FTEMP + 21.5 )
+
+  endif
+
+  /* Choose constant or variable cementation exponent
+  if ( OPT_M == 'CONSTANT' ) then
+    if ( M == missing ) then
+      DISPLAY_ERROR ( 'Must supply value for interval parameter M' )
+    else
+      mtemp = M
+    endif
+  elseif ( M_EXP == missing ) then
+    SWE_indo = missing
+    SWE      = missing
+    SXOE     = missing
+    VOL_UWAT = missing
+    VOL_XWAT = missing
+    DISPLAY_MESSAGE ( 'M_EXP log has missing value' )
+    goto END_MODEL
+  else
+    mtemp = M_EXP
+  endif
+
+  /* Calculate formation factor
+  ff = A / PHIE**mtemp
+
+  /* Calculate SWE
+  f1       = 1 / ( ff * rwtemp )
+  f2       = 2 * SQRT ( v / ( rwtemp * ff * RT_SH ) )
+  f3       = v / RT_SH
+  SWE      = ( 1 / ( RT * ( f1 + f2 + f3 ) ) ) ** (1/N)
+  SWE_INDO = SWE
+  SWE      = LIMIT ( SWE, SWE_IRR, 1 )
+  VOL_UWAT = PHIE * SWE
+
+  /* Calculate SXOE
+  if (RXO <> MISSING) then
+    f1       = 1 / ( ff * RMF )
+    f2       = 2 * SQRT ( v / ( RMF * ff * RT_SH ) )
+    f3       = v / RT_SH
+    SXOE     = ( 1 / ( RXO * ( f1 + f2 + f3 ) ) ) ** (1/N)
+    SXOE     = LIMIT ( SXOE, SWE_IRR, 1 )
+    VOL_XWAT = PHIE * SXOE
+  else
+    SXOE = MISSING
+    VOL_XWAT = VOL_UWAT
+  endif
+
+  END_MODEL:
+
+  /* Store answers
+  call PUT_FRAME ()
+
+enddo
+
+end
