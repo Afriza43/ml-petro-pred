@@ -1,0 +1,80 @@
+PROGRAM: PERM_CD  Permeability from Coates-Dumanoir
+
+/*
+/*
+/*History:   Nov 2004 (WWC)     First programmed for Geolo6
+/*
+/*           Copyright 1996-2019 Emerson Paradigm Holding LLC. All rights reserved.
+/*
+/*--------------------------------------------------------------------------
+/*start_doc
+/*
+/*PERM_CD calculates a permeability from the Coates-Dumanoir equation:
+/*
+/*    PERM_COATES_DUM = (( CONST_CD / W**4) * ( PHIE**W / SWE_IRR**W )) **2
+/*
+/*where CONST_CD is defaulted to 300 and PHIE and SWE_IRR are in V/V.
+/*
+/*W is a textural parameter related to cementation and saturation exponents (W ~ M ~ N).
+/*
+/*OPT_PERM indicates which method was used: COATES_DUM
+/*
+/*Reference: "A New Approach to Improved Log-Derived Permeability"; Coates, Dumanoir; The Log Analyst; Jan/Feb 1974.
+/*
+/*end_doc
+/*
+
+INPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       CONST_CD                         /* Constant for Coates Dumanoir equation
+       OPT_SWE_IRR            ALPHA*8   /* Option for irreducible water
+       W                                /* Textural parameter (~M, ~N)
+       SWE_IRR                v/v       /* Irreducible water saturation
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       PHIE                   v/v       /* Limited effective porosity
+       SWE_IRR_LOG            v/v       /* Irreducible water saturation
+
+LOCAL
+       swirrtemp                        /* Temporary irred water
+
+OUTPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       CONST_CD                         /* Constant for Coates Dumanoir equation
+       OPT_SWE_IRR            ALPHA*8   /* Option for irreducible water
+       W                                /* Textural parameter (~M, ~N)
+       SWE_IRR                v/v       /* Irreducible water saturation
+       OPT_PERM               ALPHA*10  /* Option for permeability
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       PERM_COATES_DUM        MD        /* Permeability from Coates Dumanoir
+
+START:
+
+dowhile GET_FRAME ()
+
+  /*Assign permeability method
+  OPT_PERM = 'COATES_DUM'
+
+  /* Interval or Log value for SWE_IRR
+  if ( OPT_SWE_IRR == 'INTERVAL' ) then
+    swirrtemp = SWE_IRR
+  else
+    swirrtemp = SWE_IRR_LOG
+  endif
+
+  /*Calculate permeability using Coates FFI method
+  PERM_COATES_DUM = ( CONST_CD / W**4 ) * ( PHIE**W / swirrtemp**W)
+  PERM_COATES_DUM = PERM_COATES_DUM * PERM_COATES_DUM
+
+  call PUT_FRAME ()
+
+enddo
+
+end

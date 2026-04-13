@@ -1,0 +1,133 @@
+PROGRAM: PERM_WYLLIE_ROSE  Permeability from Wyllie-Rose method
+
+/*
+/*
+/*History:   Aug 2004 (RXP)     First programmed for Geolog6
+/*           Nov 2004 (WWC)     Modify constants
+/*           Jan 2015 (WWC)     Correct Morris-Biggs selection value
+/*
+/*           Copyright 2004-2019 Emerson Paradigm Holding LLC. All rights reserved.
+/*
+/*--------------------------------------------------------------------------
+/*start_doc
+/*
+/*This Loglan calculates a permeability estimate based on the Wyllie-Rose method.
+/*
+/*The general form of the Wyllie-Rose equation is:
+/*
+/*  k = C1 * PHIE**D1 / ( SWE_IRR**E1 )
+/*
+/*The various versions of this equation have been implemented in the familiar format of page 10-3 of the 1989 Schlumberger "Log Interpretation Principles/Applications".
+/*
+/*  k = (( C * PHIE**D / ( SWE_IRR**E ))**2
+/*
+/*Required inputs are effective porosity, irreducible water saturation both in V/V.
+/*
+/*Morris-Biggs:
+/*
+/*  Per paper X from the 1967 SPWLA "Using Log-Derived Values of Water Saturation and Porosity" by R.L.Morris and W.P.Biggs.
+/*
+/*  For medium gravity oil, C = 250; and for gas C = 79; D = 3 and E = 1
+/*
+/*  This is the basis for Chart K2 of the Schlumberger Chart Book
+/*
+/*Note that Morris-Biggs for oil is the same as the Tixier equation but both names/options are included for completeness.
+/*
+/*Timur:
+/*
+/*  Per paper J from the 1968 SPWLA "An Investigation of Permeability, Porosity and Residual Water Saturation Relationships" by A.Timur
+/*
+/*  C = 92.63, D = 2.2 and E = 1
+/*
+/*  This has been approximated by
+/*  C = 100, D = 2.25 and E = 1 which is the basis for Chart K3 in the Schlumberger Chart Book.
+/*
+/*Tixier
+/*
+/*  Same as 'oil' option for Morris-Biggs.
+/*
+/*The user could calibrate to core permeability by adjusting exponents C, D & E. This could be done for any option as the form of the equation is the same for all options.
+/*
+/*end_doc
+
+INPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       OPT_WR                 ALPHA*16  /* C, D & E Values
+       WR_MB_FLUID            ALPHA*8   /* Fluid type
+       WR_C_MB_GAS                      /* Wyllie-Rose fluid constant
+       WR_D_MB_GAS                      /* Wyllie-Rose porosity exponent
+       WR_E_MB_GAS                      /* Wyllie-Rose saturation exponent
+       WR_C_MB_OIL                      /* Wyllie-Rose fluid constant
+       WR_D_MB_OIL                      /* Wyllie-Rose porosity exponent
+       WR_E_MB_OIL                      /* Wyllie-Rose saturation exponent
+       WR_C_TIM                         /* Wyllie-Rose fluid constant
+       WR_D_TIM                         /* Wyllie-Rose porosity exponent
+       WR_E_TIM                         /* Wyllie-Rose saturation exponent
+       WR_C_TIX                         /* Wyllie-Rose fluid constant
+       WR_D_TIX                         /* Wyllie-Rose porosity exponent
+       WR_E_TIX                         /* Wyllie-Rose saturation exponent
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       PHIE                   V/V       /* Effective porosity
+       SWE_IRR                V/V       /* Irreducible water saturation
+
+LOCAL
+       temp_c                           /* Temporary c
+       temp_d                           /* Temporary d
+
+OUTPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       OPT_WR                 ALPHA*16  /* C, D & E Values
+       WR_MB_FLUID            ALPHA*8   /* Fluid type
+       WR_C_MB_GAS                      /* Wyllie-Rose fluid constant
+       WR_D_MB_GAS                      /* Wyllie-Rose porosity exponent
+       WR_E_MB_GAS                      /* Wyllie-Rose saturation exponent
+       WR_C_MB_OIL                      /* Wyllie-Rose fluid constant
+       WR_D_MB_OIL                      /* Wyllie-Rose porosity exponent
+       WR_E_MB_OIL                      /* Wyllie-Rose saturation exponent
+       WR_C_TIM                         /* Wyllie-Rose fluid constant
+       WR_D_TIM                         /* Wyllie-Rose porosity exponent
+       WR_E_TIM                         /* Wyllie-Rose saturation exponent
+       WR_C_TIX                         /* Wyllie-Rose fluid constant
+       WR_D_TIX                         /* Wyllie-Rose porosity exponent
+       WR_E_TIX                         /* Wyllie-Rose saturation exponent
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       PERM_MB_GAS            MD        /* Permeability from Morris-Biggs (gas)
+       PERM_MB_OIL            MD        /* Permeability from Morris-Biggs (oil)
+       PERM_TIM               MD        /* Permeability from Timur
+       PERM_TIX               MD        /* Permeability from Tixier
+
+START:
+
+dowhile GET_FRAME ()
+
+  if ( OPT_WR == 'MORRIS_BIGGS' & WR_MB_FLUID == 'GAS' ) then
+    temp_c = WR_C_MB_GAS
+    temp_d = WR_D_MB_GAS
+    PERM_MB_GAS = ( temp_c * PHIE ** temp_d / SWE_IRR ** WR_E_MB_GAS ) ** 2
+  elseif ( OPT_WR == 'MORRIS_BIGGS' & WR_MB_FLUID == 'OIL' ) then
+    temp_c = WR_C_MB_OIL
+    temp_d = WR_D_MB_OIL
+    PERM_MB_OIL = ( temp_c * PHIE ** temp_d / SWE_IRR ** WR_E_MB_OIL ) ** 2
+  elseif ( OPT_WR == 'TIMUR' ) then
+    temp_c = WR_C_TIM
+    temp_d = WR_D_TIM
+    PERM_TIM = ( temp_c * PHIE ** temp_d / SWE_IRR ** WR_E_TIM ) ** 2
+  else
+    temp_c = WR_C_TIX
+    temp_d = WR_D_TIX
+    PERM_TIX = ( temp_c * PHIE ** temp_d / SWE_IRR ** WR_E_TIX ) ** 2
+  endif
+
+call PUT_FRAME ()
+
+enddo
+
+end

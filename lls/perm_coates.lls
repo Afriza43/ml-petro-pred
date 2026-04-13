@@ -1,0 +1,79 @@
+PROGRAM: PERM_COATES  Permeability from Coates FFI
+
+/*
+/*
+/*History:   Jun 1996 (SGC/WWC) Initial coding for geolog6
+/*           Mar 1997 (WWC)     Change MTH_PERM to OPT_PERM
+/*           Sep 1999 (WWC)     Add OPT_SWE_IRR to allow vble SWE_IRR
+/*           Nov 2004 (WWC)     Copied from QLS_PERM & allow variable "70"
+/*
+/*           Copyright 2004-2019 Emerson Paradigm Holding LLC. All rights reserved.
+/*
+/*--------------------------------------------------------------------------
+/*start_doc
+/*
+/*PERM_COATES calculates a permeability from the Coates Free Fluid Index method:
+/*
+/*    PERM_COATES_FFI = ( CONST_COATES * PHIE**2 * ( 1 - SWE_IRR ) / SWE_IRR ) **2
+/*
+/*where CONST_COATES is defaulted to 70 and PHIE and SWE_IRR are in V/V.
+/*
+/*This equation is the basis of Chart K4 in the Schlumberger Chart Book.
+/*
+/*OPT_PERM indicates which method was used: COATES_FFI
+/*
+/*end_doc
+/*
+
+INPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       CONST_COATES                     /* Constant for Coates equation
+       OPT_SWE_IRR            ALPHA*8   /* Option for irreducible water
+       SWE_IRR                v/v       /* Irreducible water saturation
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       PHIE                   v/v       /* Limited effective porosity
+       SWE_IRR_LOG            v/v       /* Irreducible water saturation
+
+LOCAL
+       swirrtemp                        /* Temporary irred water
+
+OUTPUT
+                                        /*
+                                        /* INTERVALS ----------------------
+                                        /*
+       CONST_COATES                     /* Constant for Coates equation
+       OPT_SWE_IRR            ALPHA*8   /* Option for irreducible water
+       SWE_IRR                v/v       /* Irreducible water saturation
+       OPT_PERM               ALPHA*10  /* Option for permeability
+                                        /*
+                                        /* LOGS ---------------------------
+                                        /*
+       PERM_COATES_FFI        MD        /* Permeability from Coates FFI
+
+START:
+
+dowhile GET_FRAME ()
+
+  /*Assign permeability method
+  OPT_PERM = 'COATES_FFI'
+
+  /* Interval or Log value for SWE_IRR
+  if ( OPT_SWE_IRR == 'INTERVAL' ) then
+    swirrtemp = SWE_IRR
+  else
+    swirrtemp = SWE_IRR_LOG
+  endif
+
+  /*Calculate permeability using Coates FFI method
+  PERM_COATES_FFI = CONST_COATES * PHIE * PHIE * ( 1 - swirrtemp ) / swirrtemp
+  PERM_COATES_FFI = PERM_COATES_FFI * PERM_COATES_FFI
+
+  call PUT_FRAME ()
+
+enddo
+
+end

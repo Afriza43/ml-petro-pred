@@ -4,7 +4,9 @@ Upload 1 ZIP → pilih sumur test → merge zone/marker CSV → train → predic
 """
 
 import lightgbm as lgb
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import (
+    RandomForestRegressor, ExtraTreesRegressor, StackingRegressor)
+from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
@@ -14,6 +16,10 @@ try:
     from catboost import CatBoostRegressor
 except Exception:
     CatBoostRegressor = None
+try:
+    from xgboost import XGBRegressor
+except Exception:
+    XGBRegressor = None
 import lasio
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
@@ -711,7 +717,7 @@ def build_vsh_linear_feature(df: pd.DataFrame,
 
 
 def apply_target_training_policy(df: pd.DataFrame, target: str,
-                                 rules: dict | None = None) -> tuple[pd.DataFrame, dict]:
+                                 rules=None):
     """
     Policy khusus per target untuk training/evaluasi.
     Rules (semua default True = aktif):
@@ -912,10 +918,44 @@ def build_model(model_name: str, params: dict):
         rf_params = params.copy()
         rf_params.pop('verbosity', None)
         return RandomForestRegressor(**rf_params)
+    if model_name == 'extratrees':
+        et_params = params.copy()
+        et_params.pop('verbosity', None)
+        return ExtraTreesRegressor(**et_params)
     if model_name == 'catboost':
         if CatBoostRegressor is None:
             raise ImportError("CatBoost belum terinstall di environment ini.")
         return CatBoostRegressor(**params)
+    if model_name == 'xgboost':
+        if XGBRegressor is None:
+            raise ImportError("XGBoost belum terinstall. pip install xgboost")
+        xgb_p = params.copy()
+        return XGBRegressor(**xgb_p)
+    if model_name == 'stacking':
+        sp = params.copy()
+        cv_folds = int(sp.pop('cv', 5))
+        nj = int(sp.pop('n_jobs', -1))
+        lgb_ne = int(sp.get('lgb_n_estimators', 500))
+        lgb_lr = float(sp.get('lgb_learning_rate', 0.03))
+        rf_ne = int(sp.get('rf_n_estimators', 300))
+        ridge_a = float(sp.get('ridge_alpha', 1.0))
+        base = [
+            ('lgb', lgb.LGBMRegressor(
+                n_estimators=lgb_ne, learning_rate=lgb_lr,
+                num_leaves=63, subsample=0.8, colsample_bytree=0.8,
+                random_state=42, n_jobs=1, verbose=-1)),
+            ('rf', RandomForestRegressor(
+                n_estimators=rf_ne, max_depth=14,
+                random_state=42, n_jobs=1)),
+        ]
+        if CatBoostRegressor is not None:
+            base.append(('cb', CatBoostRegressor(
+                iterations=300, learning_rate=0.05, depth=6,
+                random_seed=42, verbose=0)))
+        return StackingRegressor(
+            estimators=base, final_estimator=Ridge(alpha=ridge_a),
+            cv=cv_folds, n_jobs=nj, passthrough=False)
+    # Default: LightGBM
     return lgb.LGBMRegressor(**params)
 
 
@@ -1226,6 +1266,13 @@ def run_training(combined, test_wells, target_feats, opts, params, model_name='l
         }
 
         fi = getattr(model, 'feature_importances_', None)
+        # Stacking: ambil dari base estimator pertama yang punya feature_importances_
+        if fi is None and hasattr(model, 'estimators_'):
+            for _bname, _best in model.estimators_:
+                _bfi = getattr(_best, 'feature_importances_', None)
+                if _bfi is not None:
+                    fi = _bfi
+                    break
         if fi is None and hasattr(model, 'get_feature_importance'):
             fi = model.get_feature_importance()
         if fi is not None:
@@ -1618,6 +1665,244 @@ df['ZONE'] = df['ZONE'] + '_' + df['STRUCTURE']
     return doc
 
 
+def export_single_target_package(target, res, cfg, gr_norm_params) -> bytes:
+    """
+    Export model untuk satu target saja (VSH, PHIE, atau SW).
+    Termasuk info cascading dependency.
+    """
+    info = res['models'][target]
+
+    # Tentukan cascading dependency
+    cascade_order = ['VSH', 'PHIE', 'SW']
+    tgt_idx = cascade_order.index(target) if target in cascade_order else 0
+    depends_on = [t for t in cascade_order[:tgt_idx] if t in res['models']]
+
+    package = {
+        'version': '1.0',
+        'target': target,
+        'model': info['model'],
+        'feature_cols': info['ft_tr'],
+        'feature_chosen': info['ft_chosen'],
+        'cascading_dependency': depends_on,
+        'config': {
+            'target': target,
+            'model_name': cfg.get('model_name', 'LightGBM'),
+            'model_params': cfg.get('model_params', {}),
+            'training_mode': cfg.get('training_mode', 'Standard ML'),
+            'opts': cfg.get('opts', {}),
+        },
+        'gr_norm_params': gr_norm_params,
+        'le_zone': res.get('le_zone'),
+        'target_bounds': {target: TARGET_BOUNDS.get(target, (0, 1))},
+        'mnemonic_map': MNEMONIC_MAP,
+    }
+    buf = io.BytesIO()
+    pickle.dump(package, buf)
+    return buf.getvalue()
+
+
+def generate_single_target_doc(target, res, cfg) -> str:
+    """
+    Generate dokumentasi untuk model satu target.
+    Berisi: input log yang diperlukan, feature engineering, cara prediksi.
+    """
+    info = res['models'][target]
+    feats = info['ft_tr']
+
+    cascade_order = ['VSH', 'PHIE', 'SW']
+    tgt_idx = cascade_order.index(target) if target in cascade_order else 0
+    depends_on = [t for t in cascade_order[:tgt_idx] if t in res['models']]
+
+    # Identifikasi raw logs yang dibutuhkan dari features
+    raw_logs_needed = set()
+    derived_feats = []
+    for f in feats:
+        fu = f.upper()
+        if fu in ('GR', 'GR_NORM'):
+            raw_logs_needed.add('GR')
+        elif fu in ('NPHI',):
+            raw_logs_needed.add('NPHI')
+        elif fu in ('RHOB',):
+            raw_logs_needed.add('RHOB')
+        elif fu in ('RT', 'LOG_RT'):
+            raw_logs_needed.add('RT')
+        elif fu in ('VSH_LINEAR',):
+            raw_logs_needed.add('GR')
+        elif fu in ('DN_SEP', 'NPHI_RHOB_CROSS', 'CROSS_POS'):
+            raw_logs_needed.add('NPHI')
+            raw_logs_needed.add('RHOB')
+            derived_feats.append(f)
+        elif fu in ('ZONE_ENC',):
+            raw_logs_needed.add('ZONE (encoded)')
+        elif fu in ('VSH', 'VSH_PRED'):
+            if 'VSH' in depends_on:
+                raw_logs_needed.add('VSH_PRED (dari model VSH)')
+            else:
+                raw_logs_needed.add('VSH')
+        elif fu in ('PHIE', 'PHIE_PRED'):
+            if 'PHIE' in depends_on:
+                raw_logs_needed.add('PHIE_PRED (dari model PHIE)')
+            else:
+                raw_logs_needed.add('PHIE')
+        else:
+            raw_logs_needed.add(f)
+
+    doc = f"""# Petro·ML — Model {target} Documentation
+
+## Target
+**{target}** — {_target_desc(target)}
+
+## Model Info
+- **Algoritma**: {cfg.get('model_name', 'LightGBM')}
+- **Mode Training**: {cfg.get('training_mode', 'Standard ML')}
+- **Jumlah Feature**: {len(feats)}
+- **Bounds Output**: {TARGET_BOUNDS.get(target, (0, 1))}
+
+## Input Log yang Diperlukan (Raw)
+Berikut kurva log mentah yang **harus tersedia** di file LAS:
+
+| Log | Deskripsi |
+|-----|-----------|
+"""
+    for log in sorted(raw_logs_needed):
+        doc += f"| `{log}` | {_log_desc(log)} |\n"
+
+    if depends_on:
+        doc += f"""
+## Cascading Dependency
+Model ini **membutuhkan hasil prediksi** dari model sebelumnya:
+
+"""
+        for dep in depends_on:
+            doc += f"- **{dep}_PRED** harus dihitung terlebih dahulu (jalankan model {dep})\n"
+        doc += f"""
+**Urutan prediksi wajib**: {' → '.join(depends_on + [target])}
+"""
+
+    doc += f"""
+## Features yang Digunakan Model
+```
+{chr(10).join(feats)}
+```
+
+## Feature Engineering yang Diperlukan
+```python
+import numpy as np
+
+# 1. Standarisasi nama kolom (rename sesuai MNEMONIC_MAP)
+# Contoh: 'ILD' → 'RT', 'CNPHI' → 'NPHI', dll.
+
+# 2. LOG_RT (jika dibutuhkan)
+"""
+    if 'LOG_RT' in feats:
+        doc += "df['LOG_RT'] = np.where(df['RT'] > 0, np.log10(df['RT']), np.nan)\n"
+    else:
+        doc += "# LOG_RT tidak dibutuhkan untuk model ini\n"
+
+    doc += "\n# 3. DN_SEP, NPHI_RHOB_CROSS, CROSS_POS (jika dibutuhkan)\n"
+    if any(f in feats for f in ['DN_SEP', 'NPHI_RHOB_CROSS', 'CROSS_POS']):
+        doc += """RHO_MA, RHO_FL = 2.65, 1.00
+phid = (RHO_MA - df['RHOB']) / (RHO_MA - RHO_FL)
+df['DN_SEP'] = df['NPHI'] - phid
+df['NPHI_RHOB_CROSS'] = phid - df['NPHI']
+df['CROSS_POS'] = df['NPHI_RHOB_CROSS'].clip(lower=0)
+"""
+    else:
+        doc += "# Tidak dibutuhkan untuk model ini\n"
+
+    doc += "\n# 4. VSH_LINEAR (jika dibutuhkan)\n"
+    if 'VSH_LINEAR' in feats:
+        doc += """gr_min = df['GR'].quantile(0.05)
+gr_max = df['GR'].quantile(0.95)
+df['VSH_LINEAR'] = ((df['GR'] - gr_min) / (gr_max - gr_min)).clip(0, 1)
+"""
+    else:
+        doc += "# Tidak dibutuhkan untuk model ini\n"
+
+    doc += "\n# 5. GR_NORM (jika dibutuhkan)\n"
+    if 'GR_NORM' in feats:
+        doc += """# Gunakan gr_norm_params dari package
+for zone, p in gr_norm_params.items():
+    rng = p['p_high'] - p['p_low']
+    if rng > 0:
+        mask = True  # atau filter by zone
+        df.loc[mask, 'GR_NORM'] = ((df.loc[mask, 'GR'] - p['p_low']) / rng).clip(0, 1)
+"""
+    else:
+        doc += "# Tidak dibutuhkan untuk model ini\n"
+
+    doc += f"""```
+
+## Cara Prediksi
+```python
+import pickle
+import numpy as np
+
+with open('petro_ml_{target.lower()}_model.pkl', 'rb') as f:
+    pkg = pickle.load(f)
+
+model = pkg['model']
+feature_cols = pkg['feature_cols']
+bounds = pkg['target_bounds']['{target}']
+
+# Pastikan semua feature tersedia
+mask = df[feature_cols].notna().all(axis=1)
+pred = model.predict(df.loc[mask, feature_cols])
+df.loc[mask, '{target}_PRED'] = np.clip(pred, bounds[0], bounds[1])
+```
+"""
+
+    if cfg.get('training_mode', '') == 'Hybrid Residual VSH (Linear)' and target == 'VSH':
+        doc += """
+## Note: Hybrid Residual Mode
+Model ini memprediksi **residual** (selisih dari VSH_LINEAR), bukan nilai absolut.
+```python
+raw_pred = model.predict(df.loc[mask, feature_cols])
+df.loc[mask, 'VSH_PRED'] = np.clip(df.loc[mask, 'VSH_LINEAR'] + raw_pred, 0, 1)
+```
+"""
+
+    doc += f"""
+## Checklist Migrasi
+- [ ] File LAS tersedia dengan kurva: {', '.join(sorted(raw_logs_needed))}
+- [ ] Null values (-999.25 dll) sudah di-replace ke NaN
+- [ ] RT <= 0 sudah di-set ke NaN
+- [ ] Feature engineering sudah dilakukan (lihat di atas)
+"""
+    if 'GR_NORM' in feats:
+        doc += "- [ ] GR normalisasi sudah dilakukan (gunakan gr_norm_params)\n"
+    if depends_on:
+        doc += f"- [ ] Model {', '.join(depends_on)} sudah dijalankan terlebih dahulu\n"
+    if 'ZONE_ENC' in feats:
+        doc += "- [ ] Kolom ZONE tersedia dan di-encode dengan LabelEncoder dari package\n"
+
+    return doc
+
+
+def _target_desc(target):
+    descs = {
+        'VSH': 'Volume Shale (fraksi, 0-1)',
+        'PHIE': 'Effective Porosity (fraksi, 0-0.3)',
+        'SW': 'Water Saturation (fraksi, 0-1)',
+    }
+    return descs.get(target, target)
+
+
+def _log_desc(log):
+    descs = {
+        'GR': 'Gamma Ray',
+        'NPHI': 'Neutron Porosity',
+        'RHOB': 'Bulk Density',
+        'RT': 'Deep Resistivity',
+        'VSH': 'Volume Shale (dari log/interpretasi)',
+        'PHIE': 'Effective Porosity (dari log/interpretasi)',
+        'VSH_PRED (dari model VSH)': 'Output model VSH — harus prediksi dulu',
+        'PHIE_PRED (dari model PHIE)': 'Output model PHIE — harus prediksi dulu',
+        'ZONE (encoded)': 'Zone/Formation name (LabelEncoded)',
+    }
+    return descs.get(log, log)
+
+
 def predict_with_package(package, df_input, zone_df=None, marker_df=None):
     """
     Jalankan prediksi menggunakan model package pada DataFrame input.
@@ -1732,6 +2017,232 @@ def predict_with_package(package, df_input, zone_df=None, marker_df=None):
                     raw_pred, tgt)
 
     return df
+
+
+# ══════════════════════════════════════════════════════════════════
+# ML WORKFLOW VISUALIZATION
+# ══════════════════════════════════════════════════════════════════
+
+def render_ml_workflow(cfg=None, res=None, mode='single'):
+    """Tampilkan flow diagram & ringkasan konfigurasi training yang telah dilakukan."""
+
+    # ── CSS tambahan ──
+    st.markdown("""
+    <style>
+    .wf-section{font-family:'IBM Plex Mono',monospace;font-size:.72rem;
+      color:#7d8590;letter-spacing:.08em;text-transform:uppercase;
+      margin:1.4rem 0 .45rem;}
+    .wf-card{background:#161b22;border:1px solid #30363d;border-radius:8px;
+      padding:14px 18px;margin-bottom:10px;}
+    .wf-card b{color:#e6edf3;}
+    .wf-step{display:flex;align-items:flex-start;gap:14px;
+      padding:10px 0;border-bottom:1px solid #21262d;}
+    .wf-step:last-child{border-bottom:none;}
+    .wf-num{background:#0d1117;border:1px solid #30363d;border-radius:50%;
+      width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+      font-size:.75rem;color:#58a6ff;flex-shrink:0;font-weight:700;}
+    .wf-body{flex:1;}
+    .wf-title{font-size:.9rem;font-weight:700;color:#e6edf3;margin-bottom:3px;}
+    .wf-desc{font-size:.78rem;color:#8b949e;line-height:1.55;}
+    .wf-badge{display:inline-block;background:#21262d;border:1px solid #30363d;
+      border-radius:4px;padding:1px 7px;font-size:.7rem;color:#58a6ff;
+      margin:2px 2px 0 0;font-family:'IBM Plex Mono',monospace;}
+    .wf-badge.ok{border-color:#238636;color:#3fb950;}
+    .wf-badge.warn{border-color:#9e6a03;color:#e3b341;}
+    .wf-arrow{text-align:center;color:#30363d;font-size:1.3rem;
+      line-height:1;margin:2px 0;}
+    .wf-cascade{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;}
+    .wf-cas-item{background:#0d1117;border:1px solid #30363d;border-radius:6px;
+      padding:8px 14px;text-align:center;flex:1;min-width:80px;}
+    .wf-cas-label{font-size:.7rem;color:#7d8590;font-family:'IBM Plex Mono',monospace;}
+    .wf-cas-val{font-size:1rem;font-weight:700;color:#f0a500;}
+    </style>""", unsafe_allow_html=True)
+
+    is_trained = cfg is not None and res is not None
+
+    st.markdown(
+        f'<div class="wf-section">Mode: '
+        f'{"Multi-Structure" if mode == "multi" else "Single Structure"}</div>',
+        unsafe_allow_html=True)
+
+    # ── BLOK STEPS ──
+    tgt_list  = cfg.get('targets', ['VSH', 'PHIE', 'SW']) if cfg else ['VSH','PHIE','SW']
+    mdl_name  = cfg.get('model_name', '—') if cfg else '—'
+    trn_mode  = cfg.get('training_mode', '—') if cfg else '—'
+    opts      = cfg.get('opts', {}) if cfg else {}
+    n_tw      = len(cfg.get('test_wells', [])) if cfg else 0
+    structures= cfg.get('structures', []) if cfg else []
+
+    def _badges(items, cls=''):
+        return ''.join(f'<span class="wf-badge {cls}">{i}</span>' for i in items)
+
+    steps = [
+        {
+            'icon': '📁', 'title': '01 · Input Data',
+            'desc': (
+                f'Upload file <b>.las</b> (format LAS 2.0/3.0) per sumur. '
+                + (f'Struktur: {_badges(structures, "ok")}' if structures else
+                   'Satu struktur (ZIP berisi semua LAS).')
+                + '<br>Mnemonic distandarisasi otomatis (GR, NPHI, RHOB, RT, VSH, PHIE, SW, dll).'
+            )
+        },
+        {
+            'icon': '🗺️', 'title': '02 · Zone & Marker Merge',
+            'desc': (
+                'Zone CSV di-merge berdasarkan kedalaman (MD) ke setiap baris LAS. '
+                'Hasilnya kolom <code>ZONE</code> untuk setiap sampel kedalaman. '
+                + (f'Zona dikombinasi: <b>ZONE_STRUCTURE</b> (misal <code>Upper TAF_BN</code>) '
+                   'agar zona yang sama di struktur berbeda diperlakukan terpisah.'
+                   if mode == 'multi' else '')
+            )
+        },
+        {
+            'icon': '🧹', 'title': '03 · QC Pipeline',
+            'desc': (
+                'Baris dengan semua log NaN dihapus. RT ≤ 0 → NaN. '
+                'Target di luar batas fisik dihapus '
+                '(VSH: 0–1, PHIE: 0–0.5, SW: 0–1). '
+                'Opsional: Z-Score outlier filter pada GR/NPHI/RHOB/RT.'
+            )
+        },
+        {
+            'icon': '📐', 'title': '04 · Normalisasi GR',
+            'desc': (
+                'GR per sumur dinormalisasi ke referensi struktur '
+                'menggunakan remapping percentile OLD→NEW:<br>'
+                '<code>GR_NORM = ((P_HIGH_NEW − P_LOW_NEW) / (P_HIGH_OLD − P_LOW_OLD)) '
+                '× (GR − P_LOW_OLD) + P_LOW_NEW</code><br>'
+                + ('GR_NORM dihitung <b>per struktur</b> secara terpisah.' if mode == 'multi'
+                   else 'GR_NORM dihitung dari semua sumur dalam ZIP.')
+                + ' Di-skip jika kolom GR_NORM/GRN sudah ada di LAS.'
+            )
+        },
+        {
+            'icon': '⚗️', 'title': '05 · Feature Engineering',
+            'desc': (
+                'Fitur turunan dihitung dari log dasar:<br>'
+                '<b>VSH_LINEAR</b> = (GR_NORM − GR_MA) / (GR_SH − GR_MA) — baseline petrophysics VSH<br>'
+                '<b>LOG_RT</b> = log₁₀(RT)<br>'
+                '<b>DN_SEP</b> = NPHI − PHID &nbsp;·&nbsp; '
+                '<b>NPHI_RHOB_CROSS</b> = PHID − NPHI &nbsp;·&nbsp; '
+                '<b>CROSS_POS</b> = max(0, PHID − NPHI)<br>'
+                '<b>ZONE_ENC</b> = LabelEncoder zona (fit dari data train only)'
+            )
+        },
+        {
+            'icon': '✂️', 'title': '06 · Split Train / Test',
+            'desc': (
+                f'Sumur test ({_badges(cfg["test_wells"], "warn") if (cfg and n_tw <= 8) else f"<b>{n_tw} sumur</b>"}) '
+                f'dipisahkan dari data training. '
+                f'Semua parameter preprocessing (GR_MA, GR_SH, LabelEncoder) '
+                f'dihitung dari data <b>training only</b> (no leakage).'
+            ) if cfg else 'Sumur test ditentukan user; preprocessing fit dari train only.'
+        },
+        {
+            'icon': '🔁', 'title': '07 · Out-Of-Fold (OOF) Predictions',
+            'desc': (
+                'Prediksi training set menggunakan strategi '
+                '<b>Leave-One-Well-Out (LOWO)</b>: '
+                'model dilatih tanpa 1 sumur, prediksi dibuat untuk sumur tersebut. '
+                'Diulang untuk semua sumur training. '
+                'Hasil OOF digunakan sebagai <code>VSH_PRED</code> / <code>PHIE_PRED</code> '
+                'untuk feature cascading pada target berikutnya.'
+            )
+        },
+        {
+            'icon': '🔗', 'title': '08 · Cascading Prediction',
+            'desc': (
+                'Target diprediksi secara berurutan sehingga prediksi sebelumnya '
+                'menjadi feature untuk target berikutnya:'
+            )
+        },
+        {
+            'icon': '🤖', 'title': f'09 · Training Model — {mdl_name}',
+            'desc': (
+                f'Mode training: <b>{trn_mode}</b>.<br>'
+                + ('Hybrid Residual: model memprediksi <b>residual</b> = VSH − VSH_LINEAR, '
+                   'lalu dijumlahkan kembali ke VSH_LINEAR untuk hasil akhir.<br>'
+                   if 'Hybrid' in trn_mode else '')
+                + 'Features per target: '
+                + ' &nbsp;|&nbsp; '.join(
+                    f'<b>{t}</b>: {_badges(cfg["target_feats"].get(t,[]), "")}'
+                    for t in tgt_list if cfg and cfg.get("target_feats")
+                )
+                if cfg and cfg.get("target_feats") else
+                'Features dipilih user per target (GR, GR_NORM, NPHI, RHOB, LOG_RT, ZONE_ENC, dll).'
+            )
+        },
+        {
+            'icon': '📊', 'title': '10 · Evaluasi Model',
+            'desc': (
+                'Metrics dihitung pada sumur test (prediksi vs aktual): '
+                '<b>R²</b>, <b>RMSE</b>, <b>MAE</b>. '
+                'Tersedia breakdown per sumur dan per zona. '
+                'Feature importance dari model ditampilkan untuk interpretasi.'
+            )
+        },
+        {
+            'icon': '💾', 'title': '11 · Export & Deployment',
+            'desc': (
+                'Model di-bundle ke file <code>.pkl</code> berisi: '
+                'model object, feature list, config, GR norm params, LabelEncoder zona. '
+                'Tab <b>Model Testing</b>: upload LAS baru → prediksi langsung '
+                'dengan model yang sudah di-train atau dari file .pkl.'
+            )
+        },
+    ]
+
+    for i, s in enumerate(steps):
+        is_cascade = (i == 7)  # step 08
+        st.markdown(
+            f'<div class="wf-card">'
+            f'<div class="wf-step">'
+            f'<div class="wf-num">{s["icon"]}</div>'
+            f'<div class="wf-body">'
+            f'<div class="wf-title">{s["title"]}</div>'
+            f'<div class="wf-desc">{s["desc"]}</div>'
+            + ('''
+            <div class="wf-cascade" style="margin-top:10px;">
+              <div class="wf-cas-item">
+                <div class="wf-cas-label">Step 1</div>
+                <div class="wf-cas-val">VSH</div>
+                <div class="wf-cas-label" style="margin-top:4px;">GR · GR_NORM<br>NPHI · RHOB<br>VSH_LINEAR</div>
+              </div>
+              <div style="display:flex;align-items:center;color:#30363d;font-size:1.4rem;">→</div>
+              <div class="wf-cas-item">
+                <div class="wf-cas-label">Step 2</div>
+                <div class="wf-cas-val">PHIE</div>
+                <div class="wf-cas-label" style="margin-top:4px;">GR · NPHI · RHOB<br>+ <span style="color:#f0a500">VSH_PRED</span></div>
+              </div>
+              <div style="display:flex;align-items:center;color:#30363d;font-size:1.4rem;">→</div>
+              <div class="wf-cas-item">
+                <div class="wf-cas-label">Step 3</div>
+                <div class="wf-cas-val">SW</div>
+                <div class="wf-cas-label" style="margin-top:4px;">RT · NPHI · RHOB<br>+ <span style="color:#f0a500">VSH_PRED</span><br>+ <span style="color:#f0a500">PHIE_PRED</span></div>
+              </div>
+            </div>
+            ''' if is_cascade else '')
+            + '</div></div></div>',
+            unsafe_allow_html=True)
+
+    # ── Status aktual training ──
+    if is_trained and res.get('metrics'):
+        st.markdown('<div class="wf-section">Hasil Training Aktual</div>',
+                    unsafe_allow_html=True)
+        mets = res['metrics']
+        html = '<div class="kpi-row">'
+        for tgt, wm in mets.items():
+            r2s = [m['R2'] for m in wm.values()
+                   if not np.isnan(m.get('R2', float('nan')))]
+            avg_r2 = np.mean(r2s) if r2s else float('nan')
+            cls = r2c(avg_r2)
+            r2_str = f"{avg_r2:.4f}" if not np.isnan(avg_r2) else "N/A"
+            html += (f'<div class="kpi">'
+                     f'<div class="kl">{tgt}</div>'
+                     f'<div class="kv {cls}">{r2_str}</div>'
+                     f'<div class="ks">avg R² · {len(wm)} sumur test</div></div>')
+        html += '</div>'
+        st.markdown(html, unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2086,7 +2597,9 @@ def _run_multi_structure_page():
         st.markdown('<div class="sec">07 · Model Parameters</div>',
                     unsafe_allow_html=True)
         ms_model_choice = st.selectbox(
-            "Algoritma", ['LightGBM', 'RandomForest', 'CatBoost', 'ANN'],
+            "Algoritma",
+            ['LightGBM', 'RandomForest', 'CatBoost', 'ANN',
+             'XGBoost', 'ExtraTrees', 'Stacking Ensemble'],
             index=0, key='ms_model_choice')
 
         ms_training_mode = st.selectbox(
@@ -2161,7 +2674,7 @@ def _run_multi_structure_page():
                 early_stopping=True, validation_fraction=0.15,
                 n_iter_no_change=25, random_state=42)
             ms_model_name = 'ann'
-        else:
+        elif ms_model_choice == 'CatBoost':
             with st.expander("⚙ CatBoost"):
                 _ne = st.slider("iterations", 100, 2000, 800, 100,
                                 key='ms_cb_it')
@@ -2177,6 +2690,67 @@ def _run_multi_structure_page():
                 l2_leaf_reg=_l2, loss_function='RMSE',
                 eval_metric='RMSE', random_seed=42, verbose=0)
             ms_model_name = 'catboost'
+        elif ms_model_choice == 'XGBoost':
+            with st.expander("⚙ XGBoost"):
+                _ne = st.slider("n_estimators", 100, 2000, 800, 100,
+                                key='ms_xgb_ne')
+                _lr = st.select_slider("learning_rate",
+                    [0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
+                    value=0.03, key='ms_xgb_lr')
+                _dep = st.slider("max_depth", 3, 10, 6, 1, key='ms_xgb_dep')
+                _mcw = st.slider("min_child_weight", 1, 20, 5, 1,
+                                 key='ms_xgb_mcw')
+                _ss = st.slider("subsample", 0.4, 1.0, 0.8, 0.1,
+                                key='ms_xgb_ss')
+                _cb = st.slider("colsample_bytree", 0.4, 1.0, 0.8, 0.1,
+                                key='ms_xgb_cb')
+                _ra = st.number_input("reg_alpha", 0.0, 10.0, 0.1, 0.05,
+                                      key='ms_xgb_ra')
+                _rl = st.number_input("reg_lambda", 0.0, 10.0, 1.0, 0.1,
+                                      key='ms_xgb_rl')
+            ms_model_params = dict(
+                n_estimators=_ne, learning_rate=_lr, max_depth=_dep,
+                min_child_weight=_mcw, subsample=_ss, colsample_bytree=_cb,
+                reg_alpha=_ra, reg_lambda=_rl,
+                tree_method='hist', random_state=42, n_jobs=-1, verbosity=0)
+            ms_model_name = 'xgboost'
+        elif ms_model_choice == 'ExtraTrees':
+            with st.expander("⚙ ExtraTrees"):
+                _ne = st.slider("n_estimators", 100, 2000, 600, 100,
+                                key='ms_et_ne')
+                _md = st.slider("max_depth", 3, 40, 14, 1, key='ms_et_md')
+                _msl = st.slider("min_samples_leaf", 1, 20, 2, 1,
+                                 key='ms_et_msl')
+                _mss = st.slider("min_samples_split", 2, 20, 4, 1,
+                                 key='ms_et_mss')
+                _mf = st.selectbox("max_features", ['sqrt', 'log2', None],
+                                   index=0, key='ms_et_mf')
+            ms_model_params = dict(
+                n_estimators=_ne, max_depth=_md, min_samples_leaf=_msl,
+                min_samples_split=_mss, max_features=_mf,
+                random_state=42, n_jobs=-1)
+            ms_model_name = 'extratrees'
+        else:  # Stacking Ensemble
+            with st.expander("⚙ Stacking Ensemble"):
+                st.caption(
+                    "Menggabungkan LightGBM + RF (+ CatBoost jika tersedia) "
+                    "dengan Ridge meta-learner. Lebih lambat tapi akurasi lebih baik.")
+                _st_lgb_ne = st.slider("LightGBM n_estimators", 200, 1000,
+                                       500, 100, key='ms_st_lgb_ne')
+                _st_lgb_lr = st.select_slider("LightGBM learning_rate",
+                    [0.01, 0.02, 0.03, 0.05, 0.08],
+                    value=0.03, key='ms_st_lgb_lr')
+                _st_rf_ne = st.slider("RF n_estimators", 100, 800, 300, 100,
+                                      key='ms_st_rf_ne')
+                _st_ridge_a = st.number_input("Ridge alpha", 0.01, 10.0,
+                                              1.0, 0.1, key='ms_st_ridge_a')
+                _st_cv = st.slider("CV folds (internal)", 3, 7, 5, 1,
+                                   key='ms_st_cv')
+            ms_model_params = dict(
+                lgb_n_estimators=_st_lgb_ne, lgb_learning_rate=_st_lgb_lr,
+                rf_n_estimators=_st_rf_ne, ridge_alpha=_st_ridge_a,
+                cv=_st_cv, n_jobs=-1)
+            ms_model_name = 'stacking'
 
         # ── Per-Structure Weighting ──
         ms_use_weight = st.checkbox(
@@ -2210,7 +2784,9 @@ def _run_multi_structure_page():
         ms_can_train = (ms_combined is not None and len(ms_combined) > 0
                         and len(ms_test_wells) > 0
                         and len(ms_sel_tgts) > 0
-                        and any(len(v) > 0 for v in ms_target_feats.values()))
+                        and any(len(v) > 0 for v in ms_target_feats.values())
+                        and not (ms_model_choice == 'XGBoost'
+                                 and XGBRegressor is None))
         ms_train_btn = st.button("▶  Jalankan Training (Multi)",
                                   disabled=not ms_can_train,
                                   use_container_width=True,
@@ -2338,13 +2914,14 @@ def _run_multi_structure_page():
         df_te = ms_res['df_te'] if ms_res['df_te'] is not None else pd.DataFrame()
         df_tr = ms_res['df_tr']
 
-        mt1, mt2, mt3, mt4, mt5, mt6 = st.tabs([
+        mt1, mt2, mt3, mt4, mt5, mt6, mt7 = st.tabs([
             "📊 Metrics & Importance",
             "🪵 Log Plot",
             "🎯 Scatter Plot",
             "💾 Export",
             "📦 Download Model",
             "🧪 Model Testing",
+            "📋 ML Workflow",
         ])
 
         # ── Metrics ──
@@ -2634,6 +3211,49 @@ def _run_multi_structure_page():
                         file_name="petro_ml_multi_README.md",
                         mime="text/markdown",
                         use_container_width=True, key='ms_dl_doc')
+
+                # ── Per-target individual download (Multi) ──
+                st.divider()
+                st.markdown("### Download Model per Target")
+                st.markdown(
+                    '<div class="ibox">Download model terpisah per target (VSH, PHIE, SW). '
+                    'Setiap file berisi 1 model + dokumentasi input log + cascading dependency. '
+                    'Cocok untuk migrasi ke sistem lain.</div>',
+                    unsafe_allow_html=True)
+
+                ms_gr_p = SS.get('ms_gr_norm_params', {})
+                ms_tgt_list = list(ms_res['models'].keys())
+                ms_tgt_cols = st.columns(len(ms_tgt_list))
+                for i_t, t_name in enumerate(ms_tgt_list):
+                    with ms_tgt_cols[i_t]:
+                        t_info = ms_res['models'][t_name]
+                        st.markdown(f"**{t_name}**")
+                        st.caption(f"Model: {type(t_info['model']).__name__}")
+                        st.caption(f"Features: {len(t_info['ft_tr'])}")
+
+                        ms_pkg_s = export_single_target_package(
+                            t_name, ms_res, ms_cfg, ms_gr_p)
+                        st.download_button(
+                            f"⬇ Model {t_name} (.pkl)",
+                            data=ms_pkg_s,
+                            file_name=f"petro_ml_multi_{t_name.lower()}_model.pkl",
+                            mime="application/octet-stream",
+                            use_container_width=True,
+                            key=f'ms_dl_single_{t_name}')
+
+                        ms_doc_s = generate_single_target_doc(t_name, ms_res, ms_cfg)
+                        st.download_button(
+                            f"⬇ Docs {t_name} (.md)",
+                            data=ms_doc_s.encode('utf-8'),
+                            file_name=f"petro_ml_multi_{t_name.lower()}_README.md",
+                            mime="text/markdown",
+                            use_container_width=True,
+                            key=f'ms_dl_single_doc_{t_name}')
+
+                for t_name in ms_tgt_list:
+                    with st.expander(f"📖 Preview Docs — {t_name}", expanded=False):
+                        st.markdown(generate_single_target_doc(t_name, ms_res, ms_cfg))
+
             else:
                 st.markdown(
                     '<div class="ibox wbox">Belum ada model.</div>',
@@ -2949,6 +3569,10 @@ def _run_multi_structure_page():
                     file_name="petro_ml_multi_test_predictions.csv",
                     mime="text/csv", use_container_width=True,
                     key='mst_dl_csv')
+
+        # ── ML Workflow ──
+        with mt7:
+            render_ml_workflow(cfg=ms_cfg, res=ms_res, mode='multi')
 
     elif not structs:
         st.markdown("""
@@ -3325,13 +3949,18 @@ with st.sidebar:
                 unsafe_allow_html=True)
     model_choice = st.selectbox(
         "Algoritma Model",
-        options=['LightGBM', 'RandomForest', 'CatBoost', 'ANN'],
+        options=['LightGBM', 'RandomForest', 'CatBoost', 'ANN',
+                 'XGBoost', 'ExtraTrees', 'Stacking Ensemble'],
         index=0,
-        help='Gunakan baseline pembanding selain LightGBM bila diperlukan.'
+        help='Stacking Ensemble menggabungkan LightGBM+RF(+CatBoost) dengan Ridge meta-learner.'
     )
     if model_choice == 'CatBoost' and CatBoostRegressor is None:
         st.markdown('<div class="ibox wbox">CatBoost belum tersedia di environment ini. '
                     'Pilih LightGBM atau RandomForest, atau install catboost dulu.</div>',
+                    unsafe_allow_html=True)
+    if model_choice == 'XGBoost' and XGBRegressor is None:
+        st.markdown('<div class="ibox wbox">XGBoost belum tersedia. '
+                    'Jalankan: <code>pip install xgboost</code></div>',
                     unsafe_allow_html=True)
 
     training_mode = st.selectbox(
@@ -3391,7 +4020,7 @@ with st.sidebar:
                             max_iter=int(max_iter), early_stopping=True, validation_fraction=0.15,
                             n_iter_no_change=25, random_state=42)
         model_name = 'ann'
-    else:
+    elif model_choice == 'CatBoost':
         with st.expander("⚙ CatBoost Settings"):
             ne = st.slider("iterations", 100, 2000, 800, 100, key='cb_it')
             lr = st.select_slider("learning_rate",
@@ -3404,6 +4033,58 @@ with st.sidebar:
                             eval_metric='RMSE', random_seed=42,
                             verbose=0)
         model_name = 'catboost'
+    elif model_choice == 'XGBoost':
+        with st.expander("⚙ XGBoost Settings"):
+            ne = st.slider("n_estimators", 100, 2000, 800, 100, key='xgb_ne')
+            lr = st.select_slider("learning_rate",
+                                  [0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
+                                  value=0.03, key='xgb_lr')
+            depth = st.slider("max_depth", 3, 10, 6, 1, key='xgb_depth')
+            mcw = st.slider("min_child_weight", 1, 20, 5, 1, key='xgb_mcw')
+            ss = st.slider("subsample", 0.4, 1.0, 0.8, 0.1, key='xgb_ss')
+            cb = st.slider("colsample_bytree", 0.4, 1.0, 0.8, 0.1, key='xgb_cb')
+            ra = st.number_input("reg_alpha", 0.0, 10.0, 0.1, 0.05, key='xgb_ra')
+            rl = st.number_input("reg_lambda", 0.0, 10.0, 1.0, 0.1, key='xgb_rl')
+        model_params = dict(
+            n_estimators=ne, learning_rate=lr, max_depth=depth,
+            min_child_weight=mcw, subsample=ss, colsample_bytree=cb,
+            reg_alpha=ra, reg_lambda=rl,
+            tree_method='hist', random_state=42, n_jobs=-1, verbosity=0)
+        model_name = 'xgboost'
+    elif model_choice == 'ExtraTrees':
+        with st.expander("⚙ ExtraTrees Settings"):
+            ne = st.slider("n_estimators", 100, 2000, 600, 100, key='et_ne')
+            md = st.slider("max_depth", 3, 40, 14, 1, key='et_md')
+            msl = st.slider("min_samples_leaf", 1, 20, 2, 1, key='et_msl')
+            mss = st.slider("min_samples_split", 2, 20, 4, 1, key='et_mss')
+            mf = st.selectbox(
+                "max_features", ['sqrt', 'log2', None], index=0, key='et_mf')
+        model_params = dict(
+            n_estimators=ne, max_depth=md, min_samples_leaf=msl,
+            min_samples_split=mss, max_features=mf,
+            random_state=42, n_jobs=-1)
+        model_name = 'extratrees'
+    else:  # Stacking Ensemble
+        with st.expander("⚙ Stacking Ensemble Settings"):
+            st.caption(
+                "Menggabungkan LightGBM + RandomForest "
+                "(+ CatBoost jika tersedia) dengan Ridge meta-learner. "
+                "Training lebih lambat, tapi akurasi umumnya lebih baik.")
+            st_lgb_ne = st.slider("LightGBM n_estimators", 200, 1000, 500, 100,
+                                  key='st_lgb_ne')
+            st_lgb_lr = st.select_slider("LightGBM learning_rate",
+                                         [0.01, 0.02, 0.03, 0.05, 0.08],
+                                         value=0.03, key='st_lgb_lr')
+            st_rf_ne = st.slider("RF n_estimators", 100, 800, 300, 100,
+                                 key='st_rf_ne')
+            st_ridge_a = st.number_input("Ridge alpha (meta-learner)",
+                                         0.01, 10.0, 1.0, 0.1, key='st_ridge_a')
+            st_cv = st.slider("CV folds (internal)", 3, 7, 5, 1, key='st_cv')
+        model_params = dict(
+            lgb_n_estimators=st_lgb_ne, lgb_learning_rate=st_lgb_lr,
+            rf_n_estimators=st_rf_ne, ridge_alpha=st_ridge_a,
+            cv=st_cv, n_jobs=-1)
+        model_name = 'stacking'
 
     # ── Target Rules (aturan filter per target saat training) ──
     with st.expander("📋 Target Rules (Training)", expanded=False):
@@ -3430,7 +4111,8 @@ with st.sidebar:
                  and len(test_wells) > 0
                  and len(sel_tgts) > 0
                  and any(len(v) > 0 for v in target_feats.values())
-                 and not (model_choice == 'CatBoost' and CatBoostRegressor is None))
+                 and not (model_choice == 'CatBoost' and CatBoostRegressor is None)
+                 and not (model_choice == 'XGBoost' and XGBRegressor is None))
     train_btn = st.button("▶  Jalankan Training",
                           disabled=not can_train,
                           use_container_width=True)
@@ -3583,13 +4265,14 @@ if st.session_state['trained'] and st.session_state['results']:
     df_te = res['df_te'] if res['df_te'] is not None else pd.DataFrame()
     df_tr = res['df_tr']
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 Metrics & Importance",
         "🪵 Log Plot",
         "🎯 Scatter Plot",
         "💾 Export",
         "📦 Download Model",
         "🧪 Model Testing",
+        "📋 ML Workflow",
     ])
 
     # ── TAB 1 ──
@@ -3836,6 +4519,50 @@ if st.session_state['trained'] and st.session_state['results']:
                 file_name="petro_ml_config.json",
                 mime="application/json",
                 use_container_width=True)
+
+            # ── Per-target individual model download ──
+            st.divider()
+            st.markdown("### Download Model per Target")
+            st.markdown(
+                '<div class="ibox">Download model terpisah per target (VSH, PHIE, SW). '
+                'Setiap file berisi 1 model + dokumentasi input log yang diperlukan + '
+                'info cascading dependency. Cocok untuk migrasi ke sistem lain.</div>',
+                unsafe_allow_html=True)
+
+            gr_p = st.session_state.get('gr_norm_params', {})
+            tgt_list = list(res['models'].keys())
+            tgt_cols_dl = st.columns(len(tgt_list))
+            for i_tgt, tgt_name in enumerate(tgt_list):
+                with tgt_cols_dl[i_tgt]:
+                    tgt_info = res['models'][tgt_name]
+                    st.markdown(f"**{tgt_name}**")
+                    st.caption(f"Model: {type(tgt_info['model']).__name__}")
+                    st.caption(f"Features: {len(tgt_info['ft_tr'])}")
+
+                    pkg_single = export_single_target_package(
+                        tgt_name, res, cfg, gr_p)
+                    st.download_button(
+                        f"⬇ Model {tgt_name} (.pkl)",
+                        data=pkg_single,
+                        file_name=f"petro_ml_{tgt_name.lower()}_model.pkl",
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                        key=f'dl_single_{tgt_name}')
+
+                    doc_single = generate_single_target_doc(tgt_name, res, cfg)
+                    st.download_button(
+                        f"⬇ Docs {tgt_name} (.md)",
+                        data=doc_single.encode('utf-8'),
+                        file_name=f"petro_ml_{tgt_name.lower()}_README.md",
+                        mime="text/markdown",
+                        use_container_width=True,
+                        key=f'dl_single_doc_{tgt_name}')
+
+            # Preview docs per target
+            for tgt_name in tgt_list:
+                with st.expander(f"📖 Preview Docs — {tgt_name}", expanded=False):
+                    st.markdown(generate_single_target_doc(tgt_name, res, cfg))
+
         else:
             st.markdown('<div class="ibox wbox">Belum ada model yang di-train.</div>',
                         unsafe_allow_html=True)
@@ -4095,6 +4822,10 @@ if st.session_state['trained'] and st.session_state['results']:
                 file_name="petro_ml_test_predictions.csv",
                 mime="text/csv", use_container_width=True,
                 key='dl_test_csv')
+
+    # ── ML Workflow ──
+    with tab7:
+        render_ml_workflow(cfg=cfg, res=res, mode='single')
 
 else:
     # empty state
