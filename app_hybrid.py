@@ -181,7 +181,8 @@ for k, v in {
     'test_metrics': None,
     # Multi-structure state
     'app_page': 'Single Structure',
-    'structures': {},          # {name: {'wells': {}, 'zone_df': df, 'zip_hash': str, 'zone_hash': str}}
+    # {name: {'wells': {}, 'zone_df': df, 'zip_hash': str, 'zone_hash': str}}
+    'structures': {},
     'ms_combined_df': None,    # combined df from all structures
     'ms_qc_log': None,
     'ms_normalized': False,
@@ -215,6 +216,36 @@ def _normalize_well_name(name: str) -> str:
         # Pad angka ke 3 digit, suffix (TW, A, B, dll) dibiarkan
         return f"{prefix.upper()}{digits.zfill(3)}{suffix.upper()}"
     return name.upper()
+
+
+def _auto_convert_rhob_to_gcc(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Auto-convert RHOB dari kg/m3 ke g/cc per file LAS.
+
+    Rule:
+    - jika median RHOB valid > 100 DAN mayoritas nilai valid > 100,
+      anggap RHOB masih kg/m3 lalu bagi 1000
+    - jika tidak, anggap RHOB sudah g/cc
+    """
+    df = df.copy()
+
+    if 'RHOB' not in df.columns:
+        return df
+
+    rhob_num = pd.to_numeric(df['RHOB'], errors='coerce')
+    valid = rhob_num.dropna()
+    valid = valid[valid > 0]
+
+    if valid.empty:
+        return df
+
+    med = float(valid.median())
+
+    # Convert hanya jika benar-benar dominan skala ribuan
+    if med > 100:
+        df['RHOB'] = rhob_num / 1000.0
+
+    return df
 
 
 def read_las_bytes(content: bytes, well_name: str):
@@ -280,6 +311,8 @@ def read_las_bytes(content: bytes, well_name: str):
 
     if 'RT' in df.columns:
         df.loc[df['RT'] <= 0, 'RT'] = np.nan
+
+    df = _auto_convert_rhob_to_gcc(df)
 
     df['WELL_NAME'] = _normalize_well_name(well_name)
 
@@ -1063,7 +1096,8 @@ def compute_zone_metrics(df_te, targets, zone_col='ZONE'):
             if m['N'] >= 5:
                 rows.append({'ZONE': z, **m})
         if rows:
-            results[tgt] = pd.DataFrame(rows).sort_values('R2', ascending=False)
+            results[tgt] = pd.DataFrame(
+                rows).sort_values('R2', ascending=False)
     return results
 
 
@@ -1099,7 +1133,8 @@ def run_training(combined, test_wells, target_feats, opts, params, model_name='l
     train_only = combined[~mask_test]
     if 'GR_NORM' in train_only.columns and train_only['GR_NORM'].notna().any():
         grn_valid = train_only[train_only['GR_NORM'].notna()]
-        zone_s = train_only['ZONE'].fillna('UNKNOWN').astype(str).str.strip() if 'ZONE' in train_only.columns else pd.Series('UNKNOWN', index=train_only.index)
+        zone_s = train_only['ZONE'].fillna('UNKNOWN').astype(str).str.strip(
+        ) if 'ZONE' in train_only.columns else pd.Series('UNKNOWN', index=train_only.index)
 
         g_ma = float(np.nanpercentile(grn_valid['GR_NORM'], 3))
         g_sh = float(np.nanpercentile(grn_valid['GR_NORM'], 97))
@@ -1123,20 +1158,24 @@ def run_training(combined, test_wells, target_feats, opts, params, model_name='l
         # Apply train-derived params to ALL data
         combined = combined.copy()
         combined['VSH_LINEAR'] = np.nan
-        zone_all = combined['ZONE'].fillna('UNKNOWN').astype(str).str.strip() if 'ZONE' in combined.columns else pd.Series('UNKNOWN', index=combined.index)
+        zone_all = combined['ZONE'].fillna('UNKNOWN').astype(str).str.strip(
+        ) if 'ZONE' in combined.columns else pd.Series('UNKNOWN', index=combined.index)
 
         for z, (z_ma, z_sh) in vsh_lin_params.items():
             m = (zone_all == z) & combined['GR_NORM'].notna()
             if m.any():
                 rng = max(z_sh - z_ma, 1e-9)
-                combined.loc[m, 'VSH_LINEAR'] = ((combined.loc[m, 'GR_NORM'] - z_ma) / rng).clip(0, 1)
+                combined.loc[m, 'VSH_LINEAR'] = (
+                    (combined.loc[m, 'GR_NORM'] - z_ma) / rng).clip(0, 1)
 
         m_global = combined['VSH_LINEAR'].isna() & combined['GR_NORM'].notna()
         if m_global.any():
             rng = max(g_sh - g_ma, 1e-9)
-            combined.loc[m_global, 'VSH_LINEAR'] = ((combined.loc[m_global, 'GR_NORM'] - g_ma) / rng).clip(0, 1)
+            combined.loc[m_global, 'VSH_LINEAR'] = (
+                (combined.loc[m_global, 'GR_NORM'] - g_ma) / rng).clip(0, 1)
     elif 'VSH_LINEAR' not in combined.columns or combined['VSH_LINEAR'].isna().all():
-        combined = build_vsh_linear_feature(combined, grn_col='GR_NORM', zone_col='ZONE')
+        combined = build_vsh_linear_feature(
+            combined, grn_col='GR_NORM', zone_col='ZONE')
 
     # ── LabelEncoder: fit on TRAIN only ──
     le_zone = None
@@ -2066,12 +2105,13 @@ def render_ml_workflow(cfg=None, res=None, mode='single'):
         unsafe_allow_html=True)
 
     # ── BLOK STEPS ──
-    tgt_list  = cfg.get('targets', ['VSH', 'PHIE', 'SW']) if cfg else ['VSH','PHIE','SW']
-    mdl_name  = cfg.get('model_name', '—') if cfg else '—'
-    trn_mode  = cfg.get('training_mode', '—') if cfg else '—'
-    opts      = cfg.get('opts', {}) if cfg else {}
-    n_tw      = len(cfg.get('test_wells', [])) if cfg else 0
-    structures= cfg.get('structures', []) if cfg else []
+    tgt_list = cfg.get('targets', ['VSH', 'PHIE', 'SW']) if cfg else [
+        'VSH', 'PHIE', 'SW']
+    mdl_name = cfg.get('model_name', '—') if cfg else '—'
+    trn_mode = cfg.get('training_mode', '—') if cfg else '—'
+    opts = cfg.get('opts', {}) if cfg else {}
+    n_tw = len(cfg.get('test_wells', [])) if cfg else 0
+    structures = cfg.get('structures', []) if cfg else []
 
     def _badges(items, cls=''):
         return ''.join(f'<span class="wf-badge {cls}">{i}</span>' for i in items)
@@ -2266,11 +2306,11 @@ def _run_multi_structure_page():
             help="Contoh: BN, MJ, TMB — nama field/area")
 
         ms_zip = st.file_uploader("ZIP berisi LAS", type=['zip'],
-                                   key='ms_zip_up')
+                                  key='ms_zip_up')
         ms_zone = st.file_uploader("Zone CSV (opsional)", type=['csv'],
-                                    key='ms_zone_up')
+                                   key='ms_zone_up')
         ms_marker = st.file_uploader("Marker CSV (opsional)", type=['csv'],
-                                      key='ms_marker_up')
+                                     key='ms_marker_up')
 
         add_btn = st.button("➕  Tambah Struktur",
                             disabled=(not struct_name or not ms_zip),
@@ -2310,17 +2350,21 @@ def _run_multi_structure_page():
                     if ms_zone is not None:
                         try:
                             zone_bytes = ms_zone.read()
-                            entry['zone_df'] = read_zone_csv(io.BytesIO(zone_bytes))
-                            entry['zone_hash'] = hashlib.md5(zone_bytes).hexdigest()
+                            entry['zone_df'] = read_zone_csv(
+                                io.BytesIO(zone_bytes))
+                            entry['zone_hash'] = hashlib.md5(
+                                zone_bytes).hexdigest()
                         except Exception as e:
                             st.warning(f"⚠ Zone CSV error untuk {sname}: {e}")
                     # Marker CSV
                     if ms_marker is not None:
                         try:
                             marker_bytes = ms_marker.read()
-                            entry['marker_df'] = pd.read_csv(io.BytesIO(marker_bytes))
+                            entry['marker_df'] = pd.read_csv(
+                                io.BytesIO(marker_bytes))
                         except Exception as e:
-                            st.warning(f"⚠ Marker CSV error untuk {sname}: {e}")
+                            st.warning(
+                                f"⚠ Marker CSV error untuk {sname}: {e}")
 
                     structs[sname] = entry
                     SS['structures'] = structs
@@ -2343,7 +2387,8 @@ def _run_multi_structure_page():
                     wells_str = ', '.join(sdata.get('well_names', [])[:5])
                     if len(sdata.get('well_names', [])) > 5:
                         wells_str += f' +{len(sdata["well_names"])-5}'
-                    zone_tag = '✓ Zone' if sdata.get('zone_df') is not None else '—'
+                    zone_tag = '✓ Zone' if sdata.get(
+                        'zone_df') is not None else '—'
                     st.markdown(
                         f'<div class="ibox" style="padding:5px 10px;">'
                         f'<b>{sname}</b> · {sdata["n_wells"]} sumur · {zone_tag}<br>'
@@ -2390,12 +2435,24 @@ def _run_multi_structure_page():
                     # Kombinasi: "Upper TAF" + "BN" → "Upper TAF_BN"
                     if 'ZONE' in merged.columns:
                         merged['ZONE_ORIGINAL'] = merged['ZONE']
+
+                        def _combine_zone_structure(z, s=sname):
+                            if pd.isna(z):
+                                return z
+
+                            z_str = str(z).strip()
+                            s_str = str(s).strip()
+
+                            if z_str.upper() in ('UNKNOWN', 'NAN', '', 'NONE'):
+                                return z
+
+                            if z_str.upper().endswith(f"_{s_str.upper()}"):
+                                return z_str
+
+                            return f"{z_str}_{s_str}"
+
                         merged['ZONE'] = merged['ZONE'].apply(
-                            lambda z, s=sname: (
-                                f"{z}_{s}"
-                                if z and str(z).upper()
-                                not in ('UNKNOWN', 'NAN', '', 'NONE')
-                                else z))
+                            _combine_zone_structure)
                     dfs.append(merged)
             if dfs:
                 ms_combined_raw = pd.concat(dfs, ignore_index=True)
@@ -2410,8 +2467,8 @@ def _run_multi_structure_page():
                                    options=[2.5, 3.0, 3.5], value=3.0,
                                    key='ms_zthr')
         ms_qc_btn = st.button("🧹  Jalankan QC",
-                               disabled=not can_qc,
-                               use_container_width=True, key='ms_qc_btn')
+                              disabled=not can_qc,
+                              use_container_width=True, key='ms_qc_btn')
         if ms_qc_btn and can_qc:
             df_qc, qc_log = run_qc_pipeline(
                 ms_combined_raw.copy(),
@@ -2432,7 +2489,8 @@ def _run_multi_structure_page():
 
         # Active combined
         _mcd = SS.get('ms_combined_df')
-        ms_combined = _mcd if (_mcd is not None and not _mcd.empty) else ms_combined_raw
+        ms_combined = _mcd if (
+            _mcd is not None and not _mcd.empty) else ms_combined_raw
 
         # ── 03 GR Norm ──
         st.markdown('<div class="sec">03 · Normalisasi GR</div>',
@@ -2457,8 +2515,8 @@ def _run_multi_structure_page():
         with mc2:
             ms_phigh = st.number_input("P high", 80, 99, 97, key='ms_phigh')
         ms_norm_btn = st.button("📐  Hitung GR_NORM",
-                                 disabled=not ms_has_gr,
-                                 use_container_width=True, key='ms_norm_btn')
+                                disabled=not ms_has_gr,
+                                use_container_width=True, key='ms_norm_btn')
         if ms_norm_btn and ms_has_gr and ms_combined is not None:
             # Per-structure normalization: hitung params per struktur
             all_params = {}
@@ -2547,7 +2605,8 @@ def _run_multi_structure_page():
                              and c in (ms_combined.columns
                                        if ms_combined is not None else [])]
 
-        ms_has_nphi_rhob = ('NPHI' in ms_avail_base and 'RHOB' in ms_avail_base)
+        ms_has_nphi_rhob = (
+            'NPHI' in ms_avail_base and 'RHOB' in ms_avail_base)
         ms_derived = []
         if ms_has_nphi_rhob:
             ms_derived += ['DN_SEP', 'NPHI_RHOB_CROSS', 'CROSS_POS']
@@ -2695,8 +2754,8 @@ def _run_multi_structure_page():
                 _ne = st.slider("n_estimators", 100, 2000, 800, 100,
                                 key='ms_xgb_ne')
                 _lr = st.select_slider("learning_rate",
-                    [0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
-                    value=0.03, key='ms_xgb_lr')
+                                       [0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
+                                       value=0.03, key='ms_xgb_lr')
                 _dep = st.slider("max_depth", 3, 10, 6, 1, key='ms_xgb_dep')
                 _mcw = st.slider("min_child_weight", 1, 20, 5, 1,
                                  key='ms_xgb_mcw')
@@ -2738,8 +2797,8 @@ def _run_multi_structure_page():
                 _st_lgb_ne = st.slider("LightGBM n_estimators", 200, 1000,
                                        500, 100, key='ms_st_lgb_ne')
                 _st_lgb_lr = st.select_slider("LightGBM learning_rate",
-                    [0.01, 0.02, 0.03, 0.05, 0.08],
-                    value=0.03, key='ms_st_lgb_lr')
+                                              [0.01, 0.02, 0.03, 0.05, 0.08],
+                                              value=0.03, key='ms_st_lgb_lr')
                 _st_rf_ne = st.slider("RF n_estimators", 100, 800, 300, 100,
                                       key='ms_st_rf_ne')
                 _st_ridge_a = st.number_input("Ridge alpha", 0.01, 10.0,
@@ -2788,9 +2847,9 @@ def _run_multi_structure_page():
                         and not (ms_model_choice == 'XGBoost'
                                  and XGBRegressor is None))
         ms_train_btn = st.button("▶  Jalankan Training (Multi)",
-                                  disabled=not ms_can_train,
-                                  use_container_width=True,
-                                  key='ms_train_btn')
+                                 disabled=not ms_can_train,
+                                 use_container_width=True,
+                                 key='ms_train_btn')
         if not ms_can_train:
             miss = []
             if not structs:
@@ -2808,15 +2867,13 @@ def _run_multi_structure_page():
     # TRAINING TRIGGER (Multi-Structure)
     # ══════════════════════════════════════════════════════════════
     if ms_train_btn and ms_can_train:
-        # Need WELL_NAME in combined_df to match ms_test_wells (keyed)
-        # The run_training function uses WELL_NAME, so we set it to the
-        # keyed name (STRUCTURE::WELL) for multi-structure
         _train_df = ms_combined.copy()
         if 'STRUCTURE' in _train_df.columns:
             _train_df['_ORIG_WELL'] = _train_df['WELL_NAME']
             _train_df['WELL_NAME'] = (
                 _train_df['STRUCTURE'].astype(str) + '::' +
-                _train_df['WELL_NAME'].astype(str))
+                _train_df['WELL_NAME'].astype(str)
+            )
 
         _ms_sw = 'structure' if ms_use_weight else None
         with st.spinner("Melatih model multi-struktur..."):
@@ -2987,10 +3044,12 @@ def _run_multi_structure_page():
                                    else [_sel_struct]):
                         st.markdown(f"#### Struktur: {s_name}")
                         # Filter df_te for this structure
-                        s_mask = df_te['WELL_NAME'].str.startswith(f"{s_name}::")
+                        s_mask = df_te['WELL_NAME'].str.startswith(
+                            f"{s_name}::")
                         df_s = df_te[s_mask]
                         if len(df_s) == 0:
-                            st.caption("Tidak ada data test untuk struktur ini.")
+                            st.caption(
+                                "Tidak ada data test untuk struktur ini.")
                             continue
 
                         zm = compute_zone_metrics(
@@ -3241,7 +3300,8 @@ def _run_multi_structure_page():
                             use_container_width=True,
                             key=f'ms_dl_single_{t_name}')
 
-                        ms_doc_s = generate_single_target_doc(t_name, ms_res, ms_cfg)
+                        ms_doc_s = generate_single_target_doc(
+                            t_name, ms_res, ms_cfg)
                         st.download_button(
                             f"⬇ Docs {t_name} (.md)",
                             data=ms_doc_s.encode('utf-8'),
@@ -3252,7 +3312,8 @@ def _run_multi_structure_page():
 
                 for t_name in ms_tgt_list:
                     with st.expander(f"📖 Preview Docs — {t_name}", expanded=False):
-                        st.markdown(generate_single_target_doc(t_name, ms_res, ms_cfg))
+                        st.markdown(generate_single_target_doc(
+                            t_name, ms_res, ms_cfg))
 
             else:
                 st.markdown(
@@ -3261,7 +3322,8 @@ def _run_multi_structure_page():
 
         # ── Model Testing (Multi-Structure) ──
         with mt6:
-            st.markdown("### Model Testing — Prediksi Well Baru (Multi-Structure)")
+            st.markdown(
+                "### Model Testing — Prediksi Well Baru (Multi-Structure)")
             st.markdown(
                 '<div class="ibox">Upload file <b>.las</b> per struktur. '
                 'Setiap grup LAS diberi nama struktur agar ZONE dikombinasi '
@@ -3277,7 +3339,7 @@ def _run_multi_structure_page():
             ms_test_pkg = None
             if ms_model_src == "Upload file .pkl":
                 ms_pkl = st.file_uploader("Upload Model (.pkl)", type=['pkl'],
-                                           key='ms_pkl_upload')
+                                          key='ms_pkl_upload')
                 if ms_pkl is not None:
                     try:
                         ms_test_pkg = pickle.load(ms_pkl)
@@ -3303,7 +3365,8 @@ def _run_multi_structure_page():
                         'target_bounds': TARGET_BOUNDS,
                         'mnemonic_map': MNEMONIC_MAP,
                     }
-                    st.success(f"✅ Model aktif — targets: {', '.join(ms_res['models'].keys())}")
+                    st.success(
+                        f"✅ Model aktif — targets: {', '.join(ms_res['models'].keys())}")
 
             # ── Upload per struktur ──
             st.markdown("---")
@@ -3325,7 +3388,8 @@ def _run_multi_structure_page():
                     zcsv = st.file_uploader(
                         "Zone CSV (opsional)", type=['csv'],
                         key=f'mst_zone_{si}')
-                    ms_test_inputs.append({'name': sn, 'las': las, 'zone': zcsv})
+                    ms_test_inputs.append(
+                        {'name': sn, 'las': las, 'zone': zcsv})
 
             # Validate
             has_any = any(inp['name'].strip() and inp['las']
@@ -3415,7 +3479,8 @@ def _run_multi_structure_page():
                             continue
                         wm = _mtm[wk]
                         parts = wk.split('::', 1)
-                        label = f"{parts[0]} / {parts[1]}" if len(parts) == 2 else wk
+                        label = f"{parts[0]} / {parts[1]}" if len(
+                            parts) == 2 else wk
                         html = (f'<div style="margin-bottom:4px;">'
                                 f'<b>{label}</b></div>'
                                 f'<div class="kpi-row">')
@@ -3549,8 +3614,8 @@ def _run_multi_structure_page():
                 df_all_exp = pd.concat(
                     [_mtr[w] for w in well_keys], ignore_index=True)
                 base_c = ['STRUCTURE', 'WELL_NAME', 'DEPTH', 'ZONE',
-                           'ZONE_ORIGINAL', 'MARKER',
-                           'GR', 'GR_NORM', 'NPHI', 'RHOB', 'RT']
+                          'ZONE_ORIGINAL', 'MARKER',
+                          'GR', 'GR_NORM', 'NPHI', 'RHOB', 'RT']
                 tgt_c = []
                 for t in targets:
                     if t in df_all_exp.columns:
@@ -4042,9 +4107,12 @@ with st.sidebar:
             depth = st.slider("max_depth", 3, 10, 6, 1, key='xgb_depth')
             mcw = st.slider("min_child_weight", 1, 20, 5, 1, key='xgb_mcw')
             ss = st.slider("subsample", 0.4, 1.0, 0.8, 0.1, key='xgb_ss')
-            cb = st.slider("colsample_bytree", 0.4, 1.0, 0.8, 0.1, key='xgb_cb')
-            ra = st.number_input("reg_alpha", 0.0, 10.0, 0.1, 0.05, key='xgb_ra')
-            rl = st.number_input("reg_lambda", 0.0, 10.0, 1.0, 0.1, key='xgb_rl')
+            cb = st.slider("colsample_bytree", 0.4,
+                           1.0, 0.8, 0.1, key='xgb_cb')
+            ra = st.number_input("reg_alpha", 0.0, 10.0,
+                                 0.1, 0.05, key='xgb_ra')
+            rl = st.number_input("reg_lambda", 0.0, 10.0,
+                                 1.0, 0.1, key='xgb_rl')
         model_params = dict(
             n_estimators=ne, learning_rate=lr, max_depth=depth,
             min_child_weight=mcw, subsample=ss, colsample_bytree=cb,

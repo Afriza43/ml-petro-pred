@@ -50,6 +50,128 @@ def safe_log10(x):
     return np.log10(np.clip(x, 1e-6, None))
 
 
+def get_plot_theme():
+    """
+    Ambil warna dari theme Streamlit agar plot mengikuti light/dark mode user.
+    """
+    base = st.get_option("theme.base") or "light"
+    bg = st.get_option("theme.backgroundColor")
+    sec_bg = st.get_option("theme.secondaryBackgroundColor")
+    text = st.get_option("theme.textColor")
+
+    if not bg:
+        bg = "#0E1117" if base == "dark" else "#FFFFFF"
+    if not sec_bg:
+        sec_bg = "#262730" if base == "dark" else "#F0F2F6"
+    if not text:
+        text = "#FAFAFA" if base == "dark" else "#31333F"
+
+    return {
+        "base": base,
+        "template": "plotly_dark" if base == "dark" else "plotly_white",
+        "paper_bg": bg,
+        "plot_bg": sec_bg,
+        "font_color": text,
+        "grid_color": "rgba(255,255,255,0.20)" if base == "dark" else "rgba(0,0,0,0.20)",
+        "axis_color": "rgba(255,255,255,0.60)" if base == "dark" else "rgba(0,0,0,0.60)",
+        "anno_bg": "rgba(15,23,42,0.80)" if base == "dark" else "rgba(255,255,255,0.85)",
+        "anno_border": "rgba(255,255,255,0.35)" if base == "dark" else "rgba(0,0,0,0.35)",
+    }
+
+# def get_shared_perm_axis_settings(results, min_exp=-2, max_exp=4):
+#     """
+#     Ambil range log bersama untuk semua crossplot dalam satu well.
+#     Default minimal 10^-2 sampai 10^4 agar tampil mirip contoh.
+#     Plotly log-axis range memakai exponent, bukan nilai asli.
+#     """
+#     vals = []
+
+#     for mres in results.values():
+#         for key in ['perm_core_used', 'perm_pred']:
+#             arr = np.asarray(mres.get(key, []), dtype=float)
+#             arr = arr[np.isfinite(arr) & (arr > 0)]
+#             if arr.size > 0:
+#                 vals.append(arr)
+
+#     if not vals:
+#         lo_exp, hi_exp = min_exp, max_exp
+#     else:
+#         all_vals = np.concatenate(vals)
+#         lo_exp = min(min_exp, int(np.floor(np.log10(all_vals.min()))))
+#         hi_exp = max(max_exp, int(np.ceil(np.log10(all_vals.max()))))
+
+#     tickvals = [10.0 ** i for i in range(lo_exp, hi_exp + 1)]
+#     ticktext = [f"{v:g}" for v in tickvals]
+
+#     return {
+#         'range': [lo_exp, hi_exp],   # penting: exponent untuk plotly log axis
+#         'tickvals': tickvals,
+#         'ticktext': ticktext,
+#     }
+
+
+def get_shared_perm_axis_settings(min_val=0.01, max_val=1000.0):
+    """
+    Fixed log axis range untuk crossplot:
+    0.01 sampai 1000 mD.
+    Plotly log-axis range memakai exponent.
+    """
+    lo_exp = np.log10(min_val)   # -2
+    hi_exp = np.log10(max_val)  # 3
+
+    tickvals = [0.01, 0.1, 1, 10, 100, 1000]
+    ticktext = ["0.01", "0.1", "1", "10", "100", "1000"]
+
+    return {
+        "range": [lo_exp, hi_exp],
+        "tickvals": tickvals,
+        "ticktext": ticktext,
+    }
+
+
+def compute_crossplot_log_stats(core, pred, axis_cfg=None):
+    """
+    Hitung statistik crossplot di log-space:
+    - CC = Pearson correlation coefficient dari log10(core) vs log10(pred)
+    - regression line log-log
+    """
+    core = np.asarray(core, dtype=float)
+    pred = np.asarray(pred, dtype=float)
+
+    mask = (core > 0) & (pred > 0) & np.isfinite(core) & np.isfinite(pred)
+    core = core[mask]
+    pred = pred[mask]
+
+    if core.size < 3:
+        return None
+
+    xlog = safe_log10(core)
+    ylog = safe_log10(pred)
+
+    cc = float(np.corrcoef(xlog, ylog)[0, 1])
+    slope, intercept = np.polyfit(xlog, ylog, 1)
+
+    if axis_cfg is None:
+        all_vals = np.concatenate([core, pred])
+        lo_exp = min(-2, int(np.floor(np.log10(all_vals.min()))))
+        hi_exp = max(4, int(np.ceil(np.log10(all_vals.max()))))
+    else:
+        lo_exp, hi_exp = axis_cfg['range']
+
+    x_line = np.logspace(lo_exp, hi_exp, 200)
+    y_reg = 10 ** (intercept + slope * np.log10(x_line))
+
+    return {
+        'core': core,
+        'pred': pred,
+        'cc': cc,
+        'slope': float(slope),
+        'intercept': float(intercept),
+        'x_line': x_line,
+        'y_reg': y_reg,
+    }
+
+
 # ── Permeability equations (dari LLS) ────────────────────────────────────────
 
 def perm_coates_dumanoir(phie, sw, C, W):
@@ -97,26 +219,58 @@ METHOD_INFO = {
     'Coates-Dumanoir': {
         'params':   ['C', 'W'],
         'defaults': {'C': 300.0, 'W': 2.0},
-        'bounds':   [(10, 2000), (1.0, 5.0)],
+        'bounds':   [(250, 400), (1.0, 5.0)],
         'obj':      _obj_cd,
-        'compute':  lambda ph, sw, p: perm_coates_dumanoir(ph, sw, p['C'], p['W']),
+        'compute': lambda ph, sw, p: perm_coates_dumanoir(ph, sw, p['C'], p['W']),
         'desc':     'k = ((C/W⁴)·(φ^W/Sw^W))²',
+        'lls_output': 'PERM_COATES_DUM',
     },
     'Coates FFI': {
         'params':   ['C'],
         'defaults': {'C': 70.0},
-        'bounds':   [(5, 500)],
+        'bounds':   [(50, 100)],
         'obj':      _obj_ffi,
-        'compute':  lambda ph, sw, p: perm_coates_ffi(ph, sw, p['C']),
+        'compute': lambda ph, sw, p: perm_coates_ffi(ph, sw, p['C']),
         'desc':     'k = (C·φ²·(1-Sw)/Sw)²',
+        'lls_output': 'PERM_COATES_FFI',
     },
-    'Wyllie-Rose': {
+
+    # ── Wyllie-Rose family dipisah sesuai LLS ──────────────────────────
+    'WR Morris-Biggs Gas': {
         'params':   ['C', 'D', 'E'],
-        'defaults': {'C': 100.0, 'D': 2.25, 'E': 1.0},
-        'bounds':   [(5, 1000), (0.5, 8.0), (0.05, 5.0)],
+        'defaults': {'C': 79.0, 'D': 3.0, 'E': 1.0},
+        'bounds':   [(50, 100), (1.0, 5.0), (0.5, 3.0)],
         'obj':      _obj_wr,
-        'compute':  lambda ph, sw, p: perm_wyllie_rose(ph, sw, p['C'], p['D'], p['E']),
-        'desc':     'k = (C·φ^D / Sw^E)²',
+        'compute': lambda ph, sw, p: perm_wyllie_rose(ph, sw, p['C'], p['D'], p['E']),
+        'desc':     'k = (C·φ^D / Sw^E)² | Morris-Biggs Gas',
+        'lls_output': 'PERM_MB_GAS',
+    },
+    'WR Morris-Biggs Oil': {
+        'params':   ['C', 'D', 'E'],
+        'defaults': {'C': 250.0, 'D': 3.0, 'E': 1.0},
+        'bounds':   [(100, 300), (1.0, 5.0), (0.5, 3.0)],
+        'obj':      _obj_wr,
+        'compute': lambda ph, sw, p: perm_wyllie_rose(ph, sw, p['C'], p['D'], p['E']),
+        'desc':     'k = (C·φ^D / Sw^E)² | Morris-Biggs Oil',
+        'lls_output': 'PERM_MB_OIL',
+    },
+    'WR Timur': {
+        'params':   ['C', 'D', 'E'],
+        'defaults': {'C': 92.63, 'D': 2.2, 'E': 1.0},
+        'bounds':   [(70, 200), (1.0, 5.0), (0.5, 3.0)],
+        'obj':      _obj_wr,
+        'compute': lambda ph, sw, p: perm_wyllie_rose(ph, sw, p['C'], p['D'], p['E']),
+        'desc':     'k = (C·φ^D / Sw^E)² | Timur',
+        'lls_output': 'PERM_TIM',
+    },
+    'WR Tixier': {
+        'params':   ['C', 'D', 'E'],
+        'defaults': {'C': 250.0, 'D': 3.0, 'E': 1.0},
+        'bounds':   [(100, 300), (1.0, 5.0), (0.5, 3.0)],
+        'obj':      _obj_wr,
+        'compute': lambda ph, sw, p: perm_wyllie_rose(ph, sw, p['C'], p['D'], p['E']),
+        'desc':     'k = (C·φ^D / Sw^E)² | Tixier',
+        'lls_output': 'PERM_TIX',
     },
 }
 
@@ -130,9 +284,9 @@ WR_DEFAULT_VARIANTS = {
 
 def compute_perm(method, phie, sw, params):
     info = METHOD_INFO.get(method)
-    if info:
-        return info['compute'](phie, sw, params)
-    return perm_wyllie_rose(phie, sw, params['C'], params['D'], params['E'])
+    if info is None:
+        raise KeyError(f"Unknown method: {method}")
+    return info['compute'](phie, sw, params)
 
 
 # ── Optimizer registry ───────────────────────────────────────────────────────
@@ -199,7 +353,8 @@ def _run_multistart_lbfgsb(obj, bounds, args, n_starts=50):
     for _ in range(n_starts):
         x0 = np.array([rng.uniform(b[0], b[1]) for b in bounds])
         try:
-            res = minimize(obj, x0, method='L-BFGS-B', bounds=bounds, args=args)
+            res = minimize(obj, x0, method='L-BFGS-B',
+                           bounds=bounds, args=args)
             if res.fun < best_fun:
                 best_fun = res.fun
                 best_x = res.x
@@ -233,13 +388,15 @@ def optimise_method(method, phie, sw, perm_core, optimizers):
     Run multiple optimizers for a given perm method.
     Returns dict: {optimizer_name: result_dict} and best_optimizer_name.
     """
-    mask = (perm_core > 0) & np.isfinite(phie) & np.isfinite(sw) & (phie > 0) & (sw > 0)
+    mask = (perm_core > 0) & np.isfinite(
+        phie) & np.isfinite(sw) & (phie > 0) & (sw > 0)
     if mask.sum() < 3:
         return None, None
 
     ph = phie[mask].values if hasattr(phie, 'values') else phie[mask]
     sw_arr = sw[mask].values if hasattr(sw, 'values') else sw[mask]
-    pc = perm_core[mask].values if hasattr(perm_core, 'values') else perm_core[mask]
+    pc = perm_core[mask].values if hasattr(
+        perm_core, 'values') else perm_core[mask]
     pc_log = safe_log10(pc)
 
     info = METHOD_INFO[method]
@@ -254,7 +411,8 @@ def optimise_method(method, phie, sw, perm_core, optimizers):
     for opt_name in optimizers:
         opt_func = OPTIMIZER_FUNCS[opt_name]
         try:
-            opt_vals, opt_fun = opt_func(obj_func, bounds, (ph, sw_arr, pc_log))
+            opt_vals, opt_fun = opt_func(
+                obj_func, bounds, (ph, sw_arr, pc_log))
         except Exception:
             continue
 
@@ -271,11 +429,16 @@ def optimise_method(method, phie, sw, perm_core, optimizers):
         rmse = np.sqrt(mean_squared_error(pc_log, pred_log))
         mae = mean_absolute_error(pc_log, pred_log)
 
+        cp_stats = compute_crossplot_log_stats(pc, pred)
+
         results_by_opt[opt_name] = {
             'params': par,
             'r2': r2,
             'rmse_log': rmse,
             'mae_log': mae,
+            'cc_log': np.nan if cp_stats is None else cp_stats['cc'],
+            'reg_slope_log': np.nan if cp_stats is None else cp_stats['slope'],
+            'reg_intercept_log': np.nan if cp_stats is None else cp_stats['intercept'],
             'obj_value': float(opt_fun),
             'perm_pred': pred,
             'perm_core_used': pc,
@@ -295,27 +458,43 @@ def eval_default(method, phie_vals, sw_vals, perm_core_vals, defaults, label):
     mask = mask & (phie_vals > 0) & (sw_vals > 0)
     if mask.sum() < 3:
         return None
-    ph, sw_a, pc = phie_vals[mask], sw_vals[mask], perm_core_vals[mask]
-    pred = compute_perm(method if method in METHOD_INFO else 'Wyllie-Rose', ph, sw_a, defaults)
+
+    ph = phie_vals[mask]
+    sw_a = sw_vals[mask]
+    pc = perm_core_vals[mask]
+
+    pred = compute_perm(
+        method if method in METHOD_INFO else 'Wyllie-Rose',
+        ph, sw_a, defaults
+    )
+
     pred_log = safe_log10(pred)
     pc_log = safe_log10(pc)
     valid = np.isfinite(pred_log) & np.isfinite(pc_log)
     if valid.sum() < 3:
         return None
+
+    pc_valid = pc[valid]
+    pred_valid = pred[valid]
+
+    cp_stats = compute_crossplot_log_stats(pc_valid, pred_valid)
+
     return {
         'params': defaults,
         'r2': r2_score(pc_log[valid], pred_log[valid]),
         'rmse_log': np.sqrt(mean_squared_error(pc_log[valid], pred_log[valid])),
         'mae_log': mean_absolute_error(pc_log[valid], pred_log[valid]),
-        'perm_pred': compute_perm(method if method in METHOD_INFO else 'Wyllie-Rose',
-                                  phie_vals, sw_vals, defaults),
-        'perm_core_used': pc,
-        'phie_used': ph,
-        'swirr_used': sw_a,
+        'cc_log': np.nan if cp_stats is None else cp_stats['cc'],
+        'reg_slope_log': np.nan if cp_stats is None else cp_stats['slope'],
+        'reg_intercept_log': np.nan if cp_stats is None else cp_stats['intercept'],
+        'perm_pred': pred_valid,
+        'perm_core_used': pc_valid,
+        'phie_used': ph[valid],
+        'swirr_used': sw_a[valid],
     }
 
-
 # ── LAS loading ─────────────────────────────────────────────────────────────
+
 
 def load_las(uploaded_file):
     raw = uploaded_file.read()
@@ -340,7 +519,8 @@ def load_las(uploaded_file):
 
 def load_core_csv(uploaded_file):
     df = pd.read_csv(uploaded_file)
-    df = df[df['WELL'].apply(lambda x: isinstance(x, str) and len(x.strip()) > 0)]
+    df = df[df['WELL'].apply(lambda x: isinstance(
+        x, str) and len(x.strip()) > 0)]
     df['DEPTH'] = pd.to_numeric(df['DEPTH'], errors='coerce')
     df['PERM_CORE'] = pd.to_numeric(df['PERM_CORE'], errors='coerce')
     if 'PORE_CORE' in df.columns:
@@ -410,7 +590,8 @@ def plot_log_perm(well_name, log_df, core_df, results, phie_col, sw_col):
         phie_full = log_df[phie_col].values
         sw_full = log_df[sw_col].values
         perm_full = compute_perm(mname, phie_full, sw_full, mres['params'])
-        perm_full = np.where(np.isfinite(perm_full) & (perm_full > 0), perm_full, np.nan)
+        perm_full = np.where(np.isfinite(perm_full) & (
+            perm_full > 0), perm_full, np.nan)
 
         r2_val = mres['r2']
         fig.add_trace(go.Scatter(
@@ -444,17 +625,26 @@ def plot_crossplot_grid(well_name, results):
     n = len(results)
     if n == 0:
         return None
+
+    theme = get_plot_theme()
+    axis_cfg = get_shared_perm_axis_settings()
+
     ncols = min(n, 3)
     nrows = (n + ncols - 1) // ncols
-
     method_names = list(results.keys())
-    subplot_titles = [f'{m}<br>R²={results[m]["r2"]:.4f}' for m in method_names]
+
+    subplot_titles = []
+    for m in method_names:
+        cc_val = results[m].get('cc_log', np.nan)
+        r2_val = results[m].get('r2', np.nan)
+        subplot_titles.append(f'{m}<br>CC={cc_val:.4f} | R²={r2_val:.4f}')
 
     fig = make_subplots(
-        rows=nrows, cols=ncols,
+        rows=nrows,
+        cols=ncols,
         subplot_titles=subplot_titles,
         horizontal_spacing=0.08,
-        vertical_spacing=0.12,
+        vertical_spacing=0.13,
     )
 
     for idx, mname in enumerate(method_names):
@@ -462,79 +652,251 @@ def plot_crossplot_grid(well_name, results):
         r = idx // ncols + 1
         c = idx % ncols + 1
 
-        pc = mres['perm_core_used']
-        pp = mres['perm_pred']
-        mask = (pc > 0) & (pp > 0) & np.isfinite(pc) & np.isfinite(pp)
-        pc_f, pp_f = pc[mask], pp[mask]
-
-        if len(pc_f) == 0:
+        stats = compute_crossplot_log_stats(
+            mres['perm_core_used'],
+            mres['perm_pred'],
+            axis_cfg=axis_cfg
+        )
+        if stats is None:
             continue
 
-        color = COLORS[idx % len(COLORS)]
-        fig.add_trace(go.Scatter(
-            x=pc_f, y=pp_f, mode='markers',
-            marker=dict(color=color, size=7, opacity=0.7),
-            name=mname, showlegend=False,
-        ), row=r, col=c)
+        # scatter points
+        fig.add_trace(
+            go.Scatter(
+                x=stats['core'],
+                y=stats['pred'],
+                mode='markers',
+                marker=dict(
+                    color='#4C78FF',
+                    size=7,
+                    opacity=0.78,
+                    line=dict(width=0)
+                ),
+                name=mname,
+                showlegend=False,
+            ),
+            row=r, col=c
+        )
 
-        lo = max(pc_f.min() * 0.3, 1e-3)
-        hi = pc_f.max() * 3
-        fig.add_trace(go.Scatter(
-            x=[lo, hi], y=[lo, hi], mode='lines',
-            line=dict(color='black', dash='dash', width=1),
-            showlegend=False,
-        ), row=r, col=c)
+        # 1:1 line
+        fig.add_trace(
+            go.Scatter(
+                x=stats['x_line'],
+                y=stats['x_line'],
+                mode='lines',
+                line=dict(color=theme["font_color"], width=1.2),
+                showlegend=False,
+                hoverinfo='skip',
+            ),
+            row=r, col=c
+        )
 
-        fig.update_xaxes(type='log', title_text='PERM Core (mD)', row=r, col=c)
-        fig.update_yaxes(type='log', title_text='PERM Pred (mD)', row=r, col=c)
+        # regression line
+        fig.add_trace(
+            go.Scatter(
+                x=stats['x_line'],
+                y=stats['y_reg'],
+                mode='lines',
+                line=dict(color='#FF5A5A', width=1.5, dash='dot'),
+                showlegend=False,
+                hoverinfo='skip',
+            ),
+            row=r, col=c
+        )
+
+        fig.update_xaxes(
+            type='log',
+            title_text='PERM Core (mD)',
+            range=axis_cfg['range'],
+            tickmode='array',
+            tickvals=axis_cfg['tickvals'],
+            ticktext=axis_cfg['ticktext'],
+            showgrid=True,
+            gridcolor=theme["grid_color"],
+            gridwidth=0.7,
+            showline=True,
+            linecolor=theme["axis_color"],
+            mirror=True,
+            zeroline=False,
+            row=r, col=c
+        )
+
+        fig.update_yaxes(
+            type='log',
+            title_text='PERM Pred (mD)',
+            range=axis_cfg['range'],
+            tickmode='array',
+            tickvals=axis_cfg['tickvals'],
+            ticktext=axis_cfg['ticktext'],
+            showgrid=True,
+            gridcolor=theme["grid_color"],
+            gridwidth=0.7,
+            showline=True,
+            linecolor=theme["axis_color"],
+            mirror=True,
+            zeroline=False,
+            row=r, col=c
+        )
+
+        axis_no = idx + 1
+        xref = 'x domain' if axis_no == 1 else f'x{axis_no} domain'
+        yref = 'y domain' if axis_no == 1 else f'y{axis_no} domain'
+
+        fig.add_annotation(
+            x=0.02,
+            y=0.98,
+            xref=xref,
+            yref=yref,
+            text=(
+                f"CC(log) = {stats['cc']:.6f}<br>"
+                f"y = 10^({stats['intercept']:.5f} + {stats['slope']:.5f}·log10(x))"
+            ),
+            showarrow=False,
+            align='left',
+            font=dict(size=10, color=theme["font_color"]),
+            bgcolor=theme["anno_bg"],
+            bordercolor=theme["anno_border"],
+            borderwidth=0.7
+        )
 
     fig.update_layout(
-        height=350 * nrows,
+        height=max(420, 420 * nrows),
         title=f"Crossplot per Method — {well_name}",
+        showlegend=False,
+        template=theme["template"],
+        paper_bgcolor=theme["paper_bg"],
+        plot_bgcolor=theme["plot_bg"],
+        font=dict(color=theme["font_color"]),
     )
     return fig
 
 
 def plot_crossplot_combined(well_name, results):
+    theme = get_plot_theme()
+    axis_cfg = get_shared_perm_axis_settings()
+
     fig = go.Figure()
-    all_min, all_max = 1e6, 1e-6
+    all_core = []
+    all_pred = []
 
     for i, (mname, mres) in enumerate(results.items()):
-        pc = mres['perm_core_used']
-        pp = mres['perm_pred']
-        mask = (pc > 0) & (pp > 0) & np.isfinite(pc) & np.isfinite(pp)
-        pc_f, pp_f = pc[mask], pp[mask]
-        if len(pc_f) == 0:
+        stats = compute_crossplot_log_stats(
+            mres['perm_core_used'],
+            mres['perm_pred'],
+            axis_cfg=axis_cfg
+        )
+        if stats is None:
             continue
-        all_min = min(all_min, pc_f.min(), pp_f.min())
-        all_max = max(all_max, pc_f.max(), pp_f.max())
-        fig.add_trace(go.Scatter(
-            x=pc_f, y=pp_f, mode='markers',
-            name=f'{mname} (R²={mres["r2"]:.3f})',
-            marker=dict(color=COLORS[i % len(COLORS)], size=7, opacity=0.7),
-        ))
 
-    lo = max(all_min * 0.3, 1e-4)
-    hi = all_max * 3
-    fig.add_trace(go.Scatter(
-        x=[lo, hi], y=[lo, hi], mode='lines',
-        name='1:1', line=dict(color='black', dash='dash', width=1),
-    ))
+        all_core.append(stats['core'])
+        all_pred.append(stats['pred'])
 
-    fig.update_xaxes(type='log', title_text='PERM Core (mD)')
-    fig.update_yaxes(type='log', title_text='PERM Predicted (mD)')
-    fig.update_layout(title=f"Crossplot Combined — {well_name}", height=550)
+        fig.add_trace(
+            go.Scatter(
+                x=stats['core'],
+                y=stats['pred'],
+                mode='markers',
+                name=f'{mname} | CC={stats["cc"]:.3f}',
+                marker=dict(
+                    color=COLORS[i % len(COLORS)],
+                    size=7,
+                    opacity=0.72
+                ),
+            )
+        )
+
+    if all_core:
+        all_core = np.concatenate(all_core)
+        all_pred = np.concatenate(all_pred)
+        overall = compute_crossplot_log_stats(
+            all_core, all_pred, axis_cfg=axis_cfg)
+
+        fig.add_trace(
+            go.Scatter(
+                x=overall['x_line'],
+                y=overall['x_line'],
+                mode='lines',
+                name='1:1',
+                line=dict(color=theme["font_color"], width=1.2),
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=overall['x_line'],
+                y=overall['y_reg'],
+                mode='lines',
+                name=f'Overall regression | CC={overall["cc"]:.3f}',
+                line=dict(color='#FF5A5A', width=1.6, dash='dot'),
+            )
+        )
+
+        fig.add_annotation(
+            x=0.02,
+            y=0.98,
+            xref='paper',
+            yref='paper',
+            text=(
+                f"Overall CC(log) = {overall['cc']:.6f}<br>"
+                f"y = 10^({overall['intercept']:.5f} + {overall['slope']:.5f}·log10(x))"
+            ),
+            showarrow=False,
+            align='left',
+            font=dict(size=11, color=theme["font_color"]),
+            bgcolor=theme["anno_bg"],
+            bordercolor=theme["anno_border"],
+            borderwidth=0.7
+        )
+
+    fig.update_xaxes(
+        type='log',
+        title_text='PERM Core (mD)',
+        range=axis_cfg['range'],
+        tickmode='array',
+        tickvals=axis_cfg['tickvals'],
+        ticktext=axis_cfg['ticktext'],
+        showgrid=True,
+        gridcolor=theme["grid_color"],
+        gridwidth=0.7,
+        showline=True,
+        linecolor=theme["axis_color"],
+        mirror=True,
+        zeroline=False,
+    )
+    fig.update_yaxes(
+        type='log',
+        title_text='PERM Predicted (mD)',
+        range=axis_cfg['range'],
+        tickmode='array',
+        tickvals=axis_cfg['tickvals'],
+        ticktext=axis_cfg['ticktext'],
+        showgrid=True,
+        gridcolor=theme["grid_color"],
+        gridwidth=0.7,
+        showline=True,
+        linecolor=theme["axis_color"],
+        mirror=True,
+        zeroline=False,
+    )
+    fig.update_layout(
+        title=f"Crossplot Combined — {well_name}",
+        height=650,
+        template=theme["template"],
+        paper_bgcolor=theme["paper_bg"],
+        plot_bgcolor=theme["plot_bg"],
+        font=dict(color=theme["font_color"]),
+    )
     return fig
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STREAMLIT APP
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 st.title("🔧 Permeability Auto-Calibration")
 st.markdown(
     "Optimasi parameter permeabilitas empiris terhadap data **core** — per well. "
-    "3 metode PERM × 5 algoritma pencarian parameter."
+    "6 metode PERM (2 Coates + 4 Wyllie-Rose Methode) × 5 algoritma pencarian parameter."
 )
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -575,7 +937,8 @@ with st.sidebar:
     with st.expander("ℹ️ Detail Rumus"):
         for m, info in METHOD_INFO.items():
             st.markdown(f"**{m}**: `{info['desc']}`")
-            defaults_str = ', '.join(f'{k}={v}' for k, v in info['defaults'].items())
+            defaults_str = ', '.join(
+                f'{k}={v}' for k, v in info['defaults'].items())
             bounds_str = ', '.join(f'{k}=[{b[0]},{b[1]}]'
                                    for k, b in zip(info['params'], info['bounds']))
             st.caption(f"Default: {defaults_str} | Bounds: {bounds_str}")
@@ -586,7 +949,8 @@ with st.sidebar:
     optimizers_selected = st.multiselect(
         "Pilih optimizer",
         all_opt_names,
-        default=['Differential Evolution', 'Dual Annealing', 'Multi-Start L-BFGS-B'],
+        default=['Differential Evolution',
+                 'Dual Annealing', 'Multi-Start L-BFGS-B'],
         help="Semakin banyak optimizer → semakin besar peluang menemukan R² terbaik, tapi lebih lama.",
     )
 
@@ -595,7 +959,8 @@ with st.sidebar:
             st.markdown(f"**{oname}** ({oinfo['short']})")
             st.caption(oinfo['desc'])
 
-    use_default = st.checkbox("Bandingkan dengan parameter default", value=True)
+    use_default = st.checkbox(
+        "Bandingkan dengan parameter default", value=True)
 
     st.divider()
     run_btn = st.button("🚀 Run Optimisation",
@@ -630,7 +995,8 @@ with tab_info:
     st.subheader("Konsep Dasar")
     st.markdown("""
 Permeabilitas reservoir dihitung secara empiris dari **PHIE** dan **SW** menggunakan
-rumus Coates-Dumanoir, Coates FFI, atau Wyllie-Rose.
+rumus Coates-Dumanoir, Coates FFI, dan family Wyllie-Rose yang dipisah menjadi:
+Morris-Biggs Gas, Morris-Biggs Oil, Timur, dan Tixier.
 
 Masalahnya: konstanta default tiap rumus **tidak selalu cocok** untuk formasi lokal.
 Tool ini mencari **parameter optimal** per well menggunakan **beberapa algoritma pencarian**
@@ -640,19 +1006,29 @@ sekaligus, lalu memilih yang menghasilkan **R² tertinggi** terhadap data core.
     st.divider()
     st.subheader("Persamaan Permeabilitas (dari LLS)")
 
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        st.markdown("**1. Coates-Dumanoir**")
-        st.latex(r"k = \left(\frac{C}{W^4} \cdot \frac{\phi_e^W}{S_w^W}\right)^2")
-        st.caption("Parameter: C (default 300), W (default 2)")
-    with col_b:
-        st.markdown("**2. Coates FFI**")
-        st.latex(r"k = \left(C \cdot \phi_e^2 \cdot \frac{1-S_w}{S_w}\right)^2")
-        st.caption("Parameter: C (default 70)")
-    with col_c:
-        st.markdown("**3. Wyllie-Rose**")
-        st.latex(r"k = \left(\frac{C \cdot \phi_e^D}{S_w^E}\right)^2")
-        st.caption("Parameter: C, D, E (Timur: 100, 2.25, 1)")
+    st.markdown("**1. Coates-Dumanoir**")
+    st.latex(r"k = \left(\frac{C}{W^4} \cdot \frac{\phi_e^W}{S_w^W}\right)^2")
+    st.caption("Parameter: C, W")
+
+    st.markdown("**2. Coates FFI**")
+    st.latex(r"k = \left(C \cdot \phi_e^2 \cdot \frac{1-S_w}{S_w}\right)^2")
+    st.caption("Parameter: C")
+
+    st.markdown("**3. WR Morris-Biggs Gas**")
+    st.latex(r"k = \left(\frac{C \cdot \phi_e^D}{S_w^E}\right)^2")
+    st.caption("Default: C=79, D=3, E=1")
+
+    st.markdown("**4. WR Morris-Biggs Oil**")
+    st.latex(r"k = \left(\frac{C \cdot \phi_e^D}{S_w^E}\right)^2")
+    st.caption("Default: C=250, D=3, E=1")
+
+    st.markdown("**5. WR Timur**")
+    st.latex(r"k = \left(\frac{C \cdot \phi_e^D}{S_w^E}\right)^2")
+    st.caption("Default: C=92.63, D=2.2, E=1")
+
+    st.markdown("**6. WR Tixier**")
+    st.latex(r"k = \left(\frac{C \cdot \phi_e^D}{S_w^E}\right)^2")
+    st.caption("Default: C=250, D=3, E=1")
 
     st.divider()
     st.subheader("Algoritma Pencarian Parameter")
@@ -752,7 +1128,8 @@ with tab_results:
         st.error("Tidak ada well yang cocok antara LAS dan Core CSV.")
         st.stop()
 
-    n_combos = len(matching_wells) * len(methods_selected) * len(optimizers_selected)
+    n_combos = len(matching_wells) * len(methods_selected) * \
+        len(optimizers_selected)
     st.subheader(
         f"Optimising: {len(matching_wells)} well × "
         f"{len(methods_selected)} metode × "
@@ -780,7 +1157,8 @@ with tab_results:
         merged = merge_core_to_log(log_df, well_core, depth_tol=depth_tol)
 
         if len(merged) < 3:
-            st.warning(f"⚠️ **{well}**: hanya {len(merged)} core match (min 3). Skip.")
+            st.warning(
+                f"⚠️ **{well}**: hanya {len(merged)} core match (min 3). Skip.")
             step += len(methods_selected)
             progress.progress(min(step / total, 1.0))
             continue
@@ -821,19 +1199,6 @@ with tab_results:
                     def_res['best_optimizer'] = 'Default'
                     well_results[f'{method} (Default)'] = def_res
 
-                if method == 'Wyllie-Rose':
-                    for vname, vdefaults in WR_DEFAULT_VARIANTS.items():
-                        vr = eval_default(
-                            'Wyllie-Rose',
-                            merged[phie_actual].values,
-                            merged[sw_actual].values,
-                            merged['PERM_CORE'].values,
-                            vdefaults, vname,
-                        )
-                        if vr is not None:
-                            vr['best_optimizer'] = 'Default'
-                            well_results[vname] = vr
-
         if well_results:
             all_results[well] = {
                 'results': well_results,
@@ -855,8 +1220,8 @@ with tab_results:
     st.subheader("📋 Summary — Best per Well")
     summary_rows = []
     for well, wd in all_results.items():
-        opt_only = {k: v for k, v in wd['results'].items()
-                    if '(Default)' not in k and not k.startswith('WR ')}
+        opt_only = {k: v for k,
+                    v in wd['results'].items() if '(Default)' not in k}
         if opt_only:
             best_name = max(opt_only, key=lambda k: opt_only[k]['r2'])
             best = opt_only[best_name]
@@ -864,11 +1229,13 @@ with tab_results:
                 'Well': well,
                 'Best Method': best_name,
                 'Best Optimizer': best.get('best_optimizer', ''),
+                'CC (log)': round(best.get('cc_log', np.nan), 4),
                 'R² (log)': round(best['r2'], 4),
                 'RMSE (log)': round(best['rmse_log'], 4),
                 'N Core': len(best['perm_core_used']),
             }
-            row.update({f'{k}': round(v, 4) for k, v in best['params'].items()})
+            row.update({f'{k}': round(v, 4)
+                       for k, v in best['params'].items()})
             summary_rows.append(row)
 
     if summary_rows:
@@ -895,14 +1262,17 @@ with tab_results:
                 for oname, ores in opt_res.items():
                     row = {
                         'Optimizer': oname,
+                        'CC (log)': round(ores.get('cc_log', np.nan), 4),
                         'R² (log)': round(ores['r2'], 4),
                         'RMSE (log)': round(ores['rmse_log'], 4),
                         'MAE (log)': round(ores['mae_log'], 4),
                         'Obj Value': round(ores['obj_value'], 6),
                     }
-                    row.update({k: round(v, 4) for k, v in ores['params'].items()})
+                    row.update({k: round(v, 4)
+                               for k, v in ores['params'].items()})
                     rows.append(row)
-                cmp_df = pd.DataFrame(rows).sort_values('R² (log)', ascending=False)
+                cmp_df = pd.DataFrame(rows).sort_values(
+                    'R² (log)', ascending=False)
                 best_opt_name = cmp_df.iloc[0]['Optimizer']
                 st.markdown(f"*{method}* — Best: **{best_opt_name}**")
                 st.dataframe(cmp_df, use_container_width=True, hide_index=True)
@@ -914,6 +1284,7 @@ with tab_results:
             row = {
                 'Method': mname,
                 'Optimizer': mres.get('best_optimizer', ''),
+                'CC (log)': round(mres.get('cc_log', np.nan), 4),
                 'R² (log)': round(mres['r2'], 4),
                 'RMSE (log)': round(mres['rmse_log'], 4),
                 'MAE (log)': round(mres['mae_log'], 4),
@@ -921,7 +1292,8 @@ with tab_results:
             row.update({k: round(v, 4) for k, v in mres['params'].items()})
             metric_rows.append(row)
 
-        metrics_df = pd.DataFrame(metric_rows).sort_values('R² (log)', ascending=False)
+        metrics_df = pd.DataFrame(metric_rows).sort_values(
+            'R² (log)', ascending=False)
         st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
         # ── Plots ────────────────────────────────────────────────────────────
@@ -994,8 +1366,7 @@ with tab_results:
     export_well = st.selectbox("Pilih well", list(all_results.keys()))
     if export_well:
         wd = all_results[export_well]
-        opt_only = {k: v for k, v in wd['results'].items()
-                    if '(Default)' not in k and not k.startswith('WR ')}
+        opt_only = {k: v for k, v in results.items() if '(Default)' not in k}
         if opt_only:
             best_method = max(opt_only, key=lambda k: opt_only[k]['r2'])
             best_params = opt_only[best_method]['params']
@@ -1003,7 +1374,8 @@ with tab_results:
             log_df_exp = wd['log_df'].copy()
             phie_full = log_df_exp[wd['phie_col']].values
             sw_full = log_df_exp[wd['sw_col']].values
-            perm_computed = compute_perm(best_method, phie_full, sw_full, best_params)
+            perm_computed = compute_perm(
+                best_method, phie_full, sw_full, best_params)
             log_df_exp['PERM_COMPUTED'] = perm_computed
             log_df_exp['PERM_METHOD'] = best_method
 
