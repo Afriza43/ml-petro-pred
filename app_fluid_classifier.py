@@ -128,7 +128,8 @@ hr{border-color:var(--border2)!important;}
 # ══════════════════════════════════════════════════════════════════
 # CONSTANTS — Mapping fluid, litho, warna, log alias
 # ══════════════════════════════════════════════════════════════════
-NULL_VALUES = [-9999.25, -9999., -999.25, -999., -9998., 9999., 9998., 1e30, -1e30]
+NULL_VALUES = [-9999.25, -9999., -999.25, -
+               999., -9998., 9999., 9998., 1e30, -1e30]
 
 MNEMONIC_MAP = {
     'DEPT': 'DEPTH', 'MD': 'DEPTH',
@@ -498,10 +499,10 @@ def _shale_point(df: pd.DataFrame):
 
 
 def _calc_dns_cutoff_vec(df: pd.DataFrame,
-                          struktur_col: str = 'STRUKTUR',
-                          zone_col: str = 'ZONE',
-                          phie_col: str = 'PHIE',
-                          gr_col: str = 'GR') -> pd.Series:
+                         struktur_col: str = 'STRUKTUR',
+                         zone_col: str = 'ZONE',
+                         phie_col: str = 'PHIE',
+                         gr_col: str = 'GR') -> pd.Series:
     """Lookup DNS_CUTOFF berdasar (STRUKTUR, ZONE) → intercept + slope*(PHIE|GR)."""
     cutoff = pd.Series(np.nan, index=df.index)
     if struktur_col not in df.columns or zone_col not in df.columns:
@@ -640,7 +641,8 @@ def apply_gr_norm(df, params):
         if pd.isna(den) or den == 0:
             continue
         grz = (p_high_new - p_low_new) / den
-        df.loc[idx, 'GR_NORM'] = grz * (df.loc[idx, 'GR'] - p_low_old) + p_low_new
+        df.loc[idx, 'GR_NORM'] = grz * \
+            (df.loc[idx, 'GR'] - p_low_old) + p_low_new
     return df
 
 
@@ -881,7 +883,7 @@ def compute_classification_metrics(yt, yp, labels) -> dict:
     yp = np.asarray(yp)
     res = {'N': int(len(yt)), 'accuracy': float(accuracy_score(yt, yp))}
     pr, rc, f1, sup = precision_recall_fscore_support(yt, yp, labels=labels,
-                                                       zero_division=0)
+                                                      zero_division=0)
     res['per_class'] = [{
         'class': lab,
         'precision': round(float(pr[i]), 4),
@@ -929,7 +931,8 @@ def train_stage1(combined: pd.DataFrame, test_wells: list, features: list,
         st.error("❌ Stage-1: train hanya 1 kelas (HC atau W).")
         return None
 
-    df_tr_bal = balance_dataframe(df_tr, 'FLUID_HC_W', strategy=balance_strategy)
+    df_tr_bal = balance_dataframe(
+        df_tr, 'FLUID_HC_W', strategy=balance_strategy)
     X = df_tr_bal[feats]
     y = df_tr_bal['FLUID_HC_W']
     le = LabelEncoder().fit(y)
@@ -959,7 +962,8 @@ def train_stage1(combined: pd.DataFrame, test_wells: list, features: list,
         df_te.loc[m_te, 'HC_W_PRED'] = le.inverse_transform(model.predict(Xt))
         if hasattr(model, 'predict_proba'):
             proba = model.predict_proba(Xt)
-            hc_idx = list(le.classes_).index('HC') if 'HC' in le.classes_ else 1
+            hc_idx = list(le.classes_).index(
+                'HC') if 'HC' in le.classes_ else 1
             df_te.loc[m_te, 'HC_W_PROBA_HC'] = proba[:, hc_idx]
 
     # Metrics
@@ -974,9 +978,11 @@ def train_stage1(combined: pd.DataFrame, test_wells: list, features: list,
             yprob = df_te.loc[s1m, 'HC_W_PROBA_HC'].values
             ok = ~np.isnan(yprob)
             if ok.sum() > 5 and len(np.unique(yt_bin[ok])) == 2:
-                metrics['roc_auc'] = float(roc_auc_score(yt_bin[ok], yprob[ok]))
+                metrics['roc_auc'] = float(
+                    roc_auc_score(yt_bin[ok], yprob[ok]))
                 fpr, tpr, _ = roc_curve(yt_bin[ok], yprob[ok])
-                metrics['roc_curve'] = {'fpr': fpr.tolist(), 'tpr': tpr.tolist()}
+                metrics['roc_curve'] = {
+                    'fpr': fpr.tolist(), 'tpr': tpr.tolist()}
 
     return {
         'model': model, 'le': le, 'features': feats,
@@ -1072,9 +1078,11 @@ def train_stage2(combined: pd.DataFrame, test_wells: list, features: list,
             yprob = df_te.loc[s2m, 'OG_PROBA_O'].values
             ok = ~np.isnan(yprob)
             if ok.sum() > 5 and len(np.unique(yt_bin[ok])) == 2:
-                metrics['roc_auc'] = float(roc_auc_score(yt_bin[ok], yprob[ok]))
+                metrics['roc_auc'] = float(
+                    roc_auc_score(yt_bin[ok], yprob[ok]))
                 fpr, tpr, _ = roc_curve(yt_bin[ok], yprob[ok])
-                metrics['roc_curve'] = {'fpr': fpr.tolist(), 'tpr': tpr.tolist()}
+                metrics['roc_curve'] = {
+                    'fpr': fpr.tolist(), 'tpr': tpr.tolist()}
 
     return {
         'model': model, 'le': le, 'features': feats,
@@ -1105,7 +1113,8 @@ def build_end_to_end(combined, test_wells, s1_res, s2_res):
     """
     if s1_res is None:
         return None, None
-    df = combined[combined['WELL_NAME'].isin(test_wells)].copy().reset_index(drop=True)
+    df = combined[combined['WELL_NAME'].isin(
+        test_wells)].copy().reset_index(drop=True)
 
     feats1 = s1_res['features']
     m1_model = s1_res['model']
@@ -1123,7 +1132,8 @@ def build_end_to_end(combined, test_wells, s1_res, s2_res):
         df.loc[m1, 'HC_W_PRED'] = m1_le.inverse_transform(m1_model.predict(Xt))
         if hasattr(m1_model, 'predict_proba'):
             proba = m1_model.predict_proba(Xt)
-            hc_idx = list(m1_le.classes_).index('HC') if 'HC' in m1_le.classes_ else 1
+            hc_idx = list(m1_le.classes_).index(
+                'HC') if 'HC' in m1_le.classes_ else 1
             df.loc[m1, 'HC_W_PROBA_HC'] = proba[:, hc_idx]
 
     if s2_res is not None:
@@ -1133,10 +1143,12 @@ def build_end_to_end(combined, test_wells, s1_res, s2_res):
         m2 = (df['HC_W_PRED'] == 'HC') & df[feats2].notna().all(axis=1)
         if m2.any():
             Xt = df.loc[m2, feats2]
-            df.loc[m2, 'OG_PRED'] = m2_le.inverse_transform(m2_model.predict(Xt))
+            df.loc[m2, 'OG_PRED'] = m2_le.inverse_transform(
+                m2_model.predict(Xt))
             if hasattr(m2_model, 'predict_proba'):
                 proba = m2_model.predict_proba(Xt)
-                o_idx = list(m2_le.classes_).index('O') if 'O' in m2_le.classes_ else 1
+                o_idx = list(m2_le.classes_).index(
+                    'O') if 'O' in m2_le.classes_ else 1
                 df.loc[m2, 'OG_PROBA_O'] = proba[:, o_idx]
 
     df.loc[df['HC_W_PRED'] == 'W', 'FLUID_PRED_3'] = 'W'
@@ -1196,7 +1208,8 @@ def plot_well_log(df: pd.DataFrame, well_name: str,
     d = df['DEPTH'].values
 
     n_tracks = 5 + (1 if show_pred else 0)
-    titles = ['GR / GR_NORM', 'RHOB / NPHI', 'RT (log)', 'LITHO', 'FLUID Aktual']
+    titles = ['GR / GR_NORM', 'RHOB / NPHI',
+              'RT (log)', 'LITHO', 'FLUID Aktual']
     if show_pred:
         titles.append('FLUID Prediksi')
     widths = [1.2, 1.2, 1.0, 0.4, 0.4] + ([0.4] if show_pred else [])
@@ -1258,7 +1271,8 @@ def plot_well_log(df: pd.DataFrame, well_name: str,
                                   xanchor='left', x=0))
     fig.update_yaxes(autorange='reversed', gridcolor='#21262d',
                      zerolinecolor='#30363d', tickfont_size=9)
-    fig.update_xaxes(gridcolor='#21262d', zerolinecolor='#30363d', tickfont_size=9)
+    fig.update_xaxes(gridcolor='#21262d',
+                     zerolinecolor='#30363d', tickfont_size=9)
     return fig
 
 
@@ -1338,7 +1352,8 @@ def render_model_block(stage_key: str, default_model='LightGBM'):
     model_choice = st.selectbox(
         f"Algoritma ({stage_key.upper()})",
         options=model_opts,
-        index=model_opts.index(default_model) if default_model in model_opts else 0,
+        index=model_opts.index(
+            default_model) if default_model in model_opts else 0,
         key=f'{stage_key}_model')
 
     name_lower = model_choice.lower()
@@ -1455,7 +1470,7 @@ with st.sidebar:
                 zh = hashlib.md5(zb).hexdigest()
                 if s.get('zip_hash') != zh:
                     with st.spinner(f"Membaca LAS struktur "
-                                     f"{s['name'] or i+1}..."):
+                                    f"{s['name'] or i+1}..."):
                         wells = load_zip_cached(zb)
                     if wells:
                         s['wells'] = wells
@@ -1487,10 +1502,11 @@ with st.sidebar:
                         st.error(f"❌ Gagal baca Zone CSV: {e}")
                 else:
                     if s.get('zone_df') is not None:
-                        st.success(f"✅ Zone: {len(s['zone_df']):,} interval (cached)")
+                        st.success(
+                            f"✅ Zone: {len(s['zone_df']):,} interval (cached)")
 
             if st.button(f"🗑 Reset Struktur #{i+1}", key=f'reset_struct_{i}',
-                          use_container_width=True):
+                         use_container_width=True):
                 s['wells'] = {}
                 s['zone_df'] = None
                 s['zip_hash'] = None
@@ -1517,7 +1533,8 @@ with st.sidebar:
         combined_raw = None
 
     # 03 QC
-    st.markdown('<div class="sec">03 · QC Pipeline</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">03 · QC Pipeline</div>',
+                unsafe_allow_html=True)
     use_iqual_filter = st.checkbox("Filter IQUAL > 0", value=True,
                                    help="Baris tanpa IQUAL > 0 dianggap tidak punya label fluid.")
     qc_btn = st.button("🧹 Jalankan QC",
@@ -1548,7 +1565,8 @@ with st.sidebar:
         combined = combined_raw
 
     # 04 GR Normalization
-    st.markdown('<div class="sec">04 · Normalisasi GR</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">04 · Normalisasi GR</div>',
+                unsafe_allow_html=True)
     p_low = st.number_input("P low", 1.0, 40.0, 3.0, key='gr_p_low')
     p_high = st.number_input("P high", 60.0, 99.0, 97.0, key='gr_p_high')
     has_gr = (combined is not None and 'GR' in combined.columns
@@ -1564,7 +1582,8 @@ with st.sidebar:
         st.success(f"✅ GR_NORM — {combined['GR_NORM'].notna().sum():,} valid")
 
     # 05 Test wells (shared by both stages)
-    st.markdown('<div class="sec">05 · Test Wells</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">05 · Test Wells</div>',
+                unsafe_allow_html=True)
     well_list = sorted(all_wells.keys()) if all_wells else []
     test_wells = st.multiselect("Pilih sumur Test Set", options=well_list,
                                 help="Sisanya jadi Training. Berlaku untuk Stage-1 & Stage-2.",
@@ -1583,8 +1602,8 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.markdown('<div class="stage-hdr">🟦 Stage-1 Configuration</div>',
                 unsafe_allow_html=True)
-    default_s1_feats = [c for c in ['GR_NORM', 'RT', 'NPHI', 'RHOB', 'VSH',
-                                     'PHIE', 'SW', 'LITHO_CODE']
+    default_s1_feats = [c for c in ['GR', 'LOG_RT', 'NPHI', 'RHOB', 'VSH',
+                                    'PHIE', 'SW', 'LITHO_CODE', 'RPBE', 'RGBE', 'SWGRAD', 'LOG_RGSA', 'RGSAA']
                         if c in avail_feats]
     s1_feats = st.multiselect(
         "Features Stage-1 (HC vs W)",
@@ -1612,7 +1631,7 @@ with st.sidebar:
         if res1 is not None:
             st.session_state['fc_s1_results'] = res1
             st.session_state['fc_s1_cfg'] = {**s1_cfg, 'features': s1_feats,
-                                              'test_wells': test_wells}
+                                             'test_wells': test_wells}
             st.success("✅ Stage-1 selesai")
 
     # ─────────── STAGE-2 BLOCK ───────────
@@ -1621,11 +1640,10 @@ with st.sidebar:
     st.markdown('<div class="stage-hdr">🟩 Stage-2 Configuration</div>',
                 unsafe_allow_html=True)
     default_s2_feats = [c for c in ['GR_NORM', 'LOG_RT', 'NPHI', 'RHOB',
-                                     'LOG_RGSA', 'NGSA', 'DGSA',
-                                     'RGSAA', 'NGSAA', 'DGSAA',
-                                     'RPBE', 'RGBE',
-                                     'DNS', 'DNSV', 'DNS_CUTOFF',
-                                     'DNBE', 'SPBE']
+                                    'PHIE', 'SW', 'VSH', 'LITHO_CODE',
+                                    'NGSA', 'DGSA', 'NGSAA', 'DGSAA',
+                                    'DNS', 'DNS_CUTOFF',
+                                    'DNBE', 'SPBE']
                         if c in avail_feats]
     s2_feats = st.multiselect(
         "Features Stage-2 (O vs G)",
@@ -1653,7 +1671,7 @@ with st.sidebar:
         if res2 is not None:
             st.session_state['fc_s2_results'] = res2
             st.session_state['fc_s2_cfg'] = {**s2_cfg, 'features': s2_feats,
-                                              'test_wells': test_wells}
+                                             'test_wells': test_wells}
             st.success("✅ Stage-2 selesai")
 
 
@@ -1673,7 +1691,8 @@ combined = st.session_state.get('combined_df')
 if combined is None or combined.empty:
     combined = combined_raw
 
-n_wells = combined['WELL_NAME'].nunique() if combined is not None and not combined.empty else 0
+n_wells = combined['WELL_NAME'].nunique(
+) if combined is not None and not combined.empty else 0
 n_rows = len(combined) if combined is not None else 0
 n_label = (combined['FLUID_CODE'].notna().sum()
            if combined is not None and 'FLUID_CODE' in combined.columns else 0)
@@ -1722,17 +1741,19 @@ with tabs[0]:
                 'Rows': len(grp),
                 'Depth Range': f"{grp['DEPTH'].min():.1f} – {grp['DEPTH'].max():.1f}",
                 'IQUAL>0': int((pd.to_numeric(grp.get('IQUAL'), errors='coerce') > 0).sum())
-                            if 'IQUAL' in grp.columns else 0,
+                if 'IQUAL' in grp.columns else 0,
                 'FLUID labeled': int(grp.get('FLUID_CODE', pd.Series()).notna().sum()),
                 'DNS_CUTOFF n': int(grp.get('DNS_CUTOFF', pd.Series()).notna().sum())
-                                if 'DNS_CUTOFF' in grp.columns else 0,
+                if 'DNS_CUTOFF' in grp.columns else 0,
                 'FLUID_DNS=G': int((grp.get('FLUID_DNS', pd.Series()) == 'G').sum()),
                 'FLUID_DNS=O': int((grp.get('FLUID_DNS', pd.Series()) == 'O').sum()),
             }
             for cls in ['O', 'G', 'W', 'OP', 'GP']:
-                row[cls] = int((grp.get('FLUID_LETTER', pd.Series()) == cls).sum())
+                row[cls] = int(
+                    (grp.get('FLUID_LETTER', pd.Series()) == cls).sum())
             rows.append(row)
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows),
+                     use_container_width=True, hide_index=True)
 
         # Ringkasan per STRUKTUR
         if 'STRUKTUR' in combined.columns:
@@ -1747,9 +1768,10 @@ with tabs[0]:
                     'Zones': sgrp['ZONE'].nunique() if 'ZONE' in sgrp.columns else 0,
                     'DNS_CUTOFF eq?': '✅' if has_eq else '⚠ none',
                     'DNS_CUTOFF n': int(sgrp.get('DNS_CUTOFF', pd.Series()).notna().sum())
-                                    if 'DNS_CUTOFF' in sgrp.columns else 0,
+                    if 'DNS_CUTOFF' in sgrp.columns else 0,
                 })
-            st.dataframe(pd.DataFrame(srows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(srows),
+                         use_container_width=True, hide_index=True)
 
         st.markdown("### Log availability per sumur")
         avail_rows = []
@@ -1762,19 +1784,22 @@ with tabs[0]:
                 else:
                     r[c] = "—"
             avail_rows.append(r)
-        st.dataframe(pd.DataFrame(avail_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(avail_rows),
+                     use_container_width=True, hide_index=True)
 
 # ──────────────────────────────────────────────────────────────────
 # TAB 2 — QC & Class Balance
 # ──────────────────────────────────────────────────────────────────
 with tabs[1]:
     if combined is None or 'FLUID_CLASS3' not in combined.columns:
-        st.info("Jalankan QC dulu agar label fluid terbentuk (FLUID_CLASS3 / HC_W / OG).")
+        st.info(
+            "Jalankan QC dulu agar label fluid terbentuk (FLUID_CLASS3 / HC_W / OG).")
     else:
         c1, c2, c3 = st.columns(3)
         with c1:
             fig_letter = plot_class_distribution(
-                combined.assign(FLUID_LETTER=combined['FLUID_LETTER'].fillna('NA')),
+                combined.assign(
+                    FLUID_LETTER=combined['FLUID_LETTER'].fillna('NA')),
                 'FLUID_LETTER',
                 'Distribusi Label Asli (O/G/W/OP/GP)')
             st.plotly_chart(fig_letter, use_container_width=True)
@@ -1793,7 +1818,7 @@ with tabs[1]:
 
         st.markdown("### Imbalance Ratio (max / min)")
         for col, lbl in [('FLUID_HC_W', 'Stage-1 (HC/W)'),
-                          ('FLUID_OG', 'Stage-2 (O/G — subset HC)')]:
+                         ('FLUID_OG', 'Stage-2 (O/G — subset HC)')]:
             sub = combined if col != 'FLUID_OG' else combined[combined['FLUID_HC_W'] == 'HC']
             if sub.empty or sub[col].dropna().empty:
                 continue
@@ -1820,7 +1845,8 @@ with tabs[1]:
 # ──────────────────────────────────────────────────────────────────
 def render_stage_result(res, cfg, stage_name, labels, proba_col):
     if res is None:
-        st.info(f"Belum ada model {stage_name}. Klik **Train {stage_name}** di sidebar.")
+        st.info(
+            f"Belum ada model {stage_name}. Klik **Train {stage_name}** di sidebar.")
         return
     st.markdown(
         f'<div class="ibox">'
@@ -1834,7 +1860,8 @@ def render_stage_result(res, cfg, stage_name, labels, proba_col):
 
     m = res['metrics']
     if m is None:
-        st.warning(f"Tidak ada metric — test set tidak punya label {stage_name}.")
+        st.warning(
+            f"Tidak ada metric — test set tidak punya label {stage_name}.")
     else:
         cA, cB, cC, cD = st.columns(4)
         cA.metric("N", f"{m['N']:,}")
@@ -1855,7 +1882,7 @@ def render_stage_result(res, cfg, stage_name, labels, proba_col):
             if 'roc_curve' in m:
                 rc = m['roc_curve']
                 st.plotly_chart(plot_roc(rc['fpr'], rc['tpr'], m['roc_auc'],
-                                          f'{stage_name} ROC'),
+                                         f'{stage_name} ROC'),
                                 use_container_width=True)
             fi = res.get('feat_imp', {})
             if fi:
@@ -1902,7 +1929,8 @@ with tabs[4]:
     elif not test_wells_e:
         st.info("Pilih Test Wells di sidebar.")
     else:
-        df_pred, e2e_m = build_end_to_end(combined, test_wells_e, s1_res, s2_res)
+        df_pred, e2e_m = build_end_to_end(
+            combined, test_wells_e, s1_res, s2_res)
         # Simpan untuk tab Well Log Viewer & Export
         st.session_state['fc_e2e_pred'] = df_pred
 
@@ -1911,7 +1939,8 @@ with tabs[4]:
                        "(tanpa pemecahan O/G).")
 
         if e2e_m is None:
-            st.warning("Tidak ada baris test yang punya label & prediksi lengkap.")
+            st.warning(
+                "Tidak ada baris test yang punya label & prediksi lengkap.")
         else:
             cA, cB, cC = st.columns(3)
             cA.metric("N", f"{e2e_m['N']:,}")
@@ -1951,7 +1980,8 @@ with tabs[5]:
         if 'ZONE' in df_well.columns and df_well['ZONE'].nunique() > 1:
             zones = sorted([z for z in df_well['ZONE'].dropna().unique()
                             if str(z).upper() not in ('UNKNOWN', 'NAN', '')])
-            sel_zones = st.multiselect("Filter zona (kosong = semua)", options=zones)
+            sel_zones = st.multiselect(
+                "Filter zona (kosong = semua)", options=zones)
             if sel_zones:
                 df_well = df_well[df_well['ZONE'].isin(sel_zones)].copy()
 
@@ -1992,7 +2022,8 @@ with tabs[6]:
                            'OG_PRED', 'OG_PROBA_O',
                            'FLUID_PRED_3']
             export_cols = [c for c in export_cols if c in df_pred.columns]
-            csv_bytes = df_pred[export_cols].to_csv(index=False).encode('utf-8')
+            csv_bytes = df_pred[export_cols].to_csv(
+                index=False).encode('utf-8')
             st.download_button(
                 "⬇ End-to-End Predictions (CSV)",
                 data=csv_bytes,
@@ -2031,7 +2062,8 @@ with tabs[6]:
             'stage1': s1_res['metrics'] if s1_res else None,
             'stage2': s2_res['metrics'] if s2_res else None,
         }
-        m_export = json.loads(json.dumps(export_metrics, default=lambda o: None))
+        m_export = json.loads(json.dumps(
+            export_metrics, default=lambda o: None))
         json_bytes = json.dumps(m_export, indent=2).encode('utf-8')
         st.download_button(
             "⬇ Metrics (JSON)",
