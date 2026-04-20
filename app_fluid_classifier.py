@@ -1337,7 +1337,7 @@ def plot_roc(fpr, tpr, auc, title='ROC') -> go.Figure:
 # ══════════════════════════════════════════════════════════════════
 # SIDEBAR HELPER — render hyperparam UI per-stage
 # ══════════════════════════════════════════════════════════════════
-def render_model_block(stage_key: str, default_model='LightGBM'):
+def render_model_block(stage_key: str, default_model='CatBoost'):
     """
     Render UI: pilih algoritma + hyperparams + balance strategy + class_weight.
     stage_key: 's1' atau 's2'  → dipakai sebagai key Streamlit unik.
@@ -1639,7 +1639,7 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.markdown('<div class="stage-hdr">🟩 Stage-2 Configuration</div>',
                 unsafe_allow_html=True)
-    default_s2_feats = [c for c in ['GR_NORM', 'LOG_RT', 'NPHI', 'RHOB',
+    default_s2_feats = [c for c in ['GR', 'LOG_RT', 'NPHI', 'RHOB',
                                     'PHIE', 'SW', 'VSH', 'LITHO_CODE',
                                     'NGSA', 'DGSA', 'NGSAA', 'DGSAA',
                                     'DNS', 'DNS_CUTOFF',
