@@ -1614,7 +1614,7 @@ with st.sidebar:
                     ''.join(f'<span class="pill">{f}</span>' for f in s1_feats) +
                     '</div>', unsafe_allow_html=True)
 
-    s1_cfg = render_model_block('s1', default_model='LightGBM')
+    s1_cfg = render_model_block('s1', default_model='CatBoost')
 
     can_train_s1 = (combined is not None and not combined.empty
                     and len(test_wells) > 0 and len(s1_feats) > 0)
@@ -1654,7 +1654,7 @@ with st.sidebar:
                     ''.join(f'<span class="pill">{f}</span>' for f in s2_feats) +
                     '</div>', unsafe_allow_html=True)
 
-    s2_cfg = render_model_block('s2', default_model='LightGBM')
+    s2_cfg = render_model_block('s2', default_model='CatBoost')
 
     can_train_s2 = (combined is not None and not combined.empty
                     and len(test_wells) > 0 and len(s2_feats) > 0)
