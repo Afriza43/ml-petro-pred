@@ -32,6 +32,7 @@ from scipy.optimize import (
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import io
 import warnings
+import re
 
 warnings.filterwarnings('ignore')
 
@@ -44,6 +45,98 @@ st.set_page_config(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 NULL_VAL = -999.25
+
+
+def _normalize_well_name(name: str) -> str:
+    """Normalisasi nama sumur → PREFIX-NNN[SUFFIX]."""
+    if not isinstance(name, str):
+        return str(name)
+    m = re.match(r'^([A-Za-z]+[-_])(\d+)([A-Za-z]*)$', name.strip())
+    if m:
+        prefix, digits, suffix = m.group(1), m.group(2), m.group(3)
+        return f"{prefix.upper()}{digits.zfill(3)}{suffix.upper()}"
+    return name.upper()
+
+
+def read_zone_csv(file_obj) -> pd.DataFrame:
+    raw = file_obj.read() if hasattr(file_obj, 'read') else open(file_obj, 'rb').read()
+    text = raw.decode('utf-8', errors='replace')
+    sep = ';' if text.count(';') > text.count(',') / 2 else ','
+    if sep == ';':
+        lines = []
+        for line in text.splitlines():
+            parts = line.split(';')
+            fixed = []
+            for p in parts:
+                p = p.strip()
+                if ',' in p:
+                    try:
+                        float(p.replace(',', '.'))
+                        p = p.replace(',', '.')
+                    except ValueError:
+                        pass
+                fixed.append(p)
+            lines.append(sep.join(fixed))
+        text = '\n'.join(lines)
+
+    df = pd.read_csv(io.StringIO(text), sep=sep, dtype=str)
+    df.columns = [c.strip().upper() for c in df.columns]
+    well_col = next((c for c in df.columns if 'WELL' in c or 'UWI' in c), None)
+    depth_col = next((c for c in df.columns if c in (
+        'MD', 'DEPTH', 'DEPTH_MD', 'TVD') or 'DEPTH' in c), None)
+    zone_col = next((c for c in df.columns if c in (
+        'SURFACE', 'ZONE', 'FORMATION', 'FORM', 'UNIT', 'LAYER', 'NAME', 'MARKER')), None)
+
+    if not all([well_col, depth_col, zone_col]):
+        cols = df.columns.tolist()
+        if len(cols) >= 3:
+            well_col, depth_col, zone_col = cols[0], cols[1], cols[2]
+        else:
+            return pd.DataFrame()
+
+    df = df[[well_col, depth_col, zone_col]].copy()
+    df.columns = ['WELL_NAME', 'MD', 'ZONE_NAME']
+    df['WELL_NAME'] = df['WELL_NAME'].str.strip().apply(_normalize_well_name)
+    df['MD'] = pd.to_numeric(df['MD'].str.strip().str.replace(
+        ',', '.', regex=False), errors='coerce')
+    df['ZONE_NAME'] = df['ZONE_NAME'].str.strip()
+
+    records = []
+    for well, grp in df.groupby('WELL_NAME'):
+        grp = grp.sort_values('MD').reset_index(drop=True)
+        valid = grp[grp['ZONE_NAME'].notna() & (
+            grp['ZONE_NAME'] != '')].reset_index(drop=True)
+        for i, row in valid.iterrows():
+            top = row['MD']
+            nxt = grp[grp['MD'] > top]['MD']
+            bot = float(nxt.iloc[0]) if len(nxt) > 0 else 99999.0
+            records.append({'WELL_NAME': well, 'DEPTH_TOP': float(
+                top), 'DEPTH_BOT': bot, 'ZONE': row['ZONE_NAME']})
+    return pd.DataFrame(records)
+
+
+def merge_zone(df: pd.DataFrame, zone_df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if 'ZONE' not in df.columns:
+        df['ZONE'] = 'UNKNOWN'
+    if zone_df is None or len(zone_df) == 0:
+        return df
+
+    # Identify well name
+    wname = None
+    if 'WELL_NAME' in df.columns:
+        wname = df['WELL_NAME'].iloc[0]
+    elif 'WELL' in df.columns:
+        wname = df['WELL'].iloc[0]
+
+    if not wname:
+        return df
+
+    zw = zone_df[zone_df['WELL_NAME'] == _normalize_well_name(wname)]
+    for _, r in zw.iterrows():
+        m = (df['DEPTH'] >= r['DEPTH_TOP']) & (df['DEPTH'] < r['DEPTH_BOT'])
+        df.loc[m, 'ZONE'] = r['ZONE']
+    return df
 
 
 def safe_log10(x):
@@ -514,6 +607,8 @@ def load_las(uploaded_file):
         pass
     if not well_name:
         well_name = uploaded_file.name.replace('.las', '').replace('.LAS', '')
+    well_name = _normalize_well_name(well_name)
+    df['WELL_NAME'] = well_name
     return well_name, df
 
 
@@ -521,6 +616,7 @@ def load_core_csv(uploaded_file):
     df = pd.read_csv(uploaded_file)
     df = df[df['WELL'].apply(lambda x: isinstance(
         x, str) and len(x.strip()) > 0)]
+    df['WELL'] = df['WELL'].apply(_normalize_well_name)
     df['DEPTH'] = pd.to_numeric(df['DEPTH'], errors='coerce')
     df['PERM_CORE'] = pd.to_numeric(df['PERM_CORE'], errors='coerce')
     if 'PORE_CORE' in df.columns:
@@ -913,6 +1009,11 @@ with st.sidebar:
         type=['csv'],
         help="Format: WELL, DEPTH, PERM_CORE (dan opsional PORE_CORE)",
     )
+    zone_file = st.file_uploader(
+        "Upload Zone CSV (opsional)",
+        type=['csv'],
+        help="Format: WELL, MD, ZONE. Jika diunggah, kalibrasi dilakukan per zona."
+    )
 
     st.divider()
     st.header("⚙️ Settings")
@@ -975,6 +1076,14 @@ if not las_files or not core_file:
 core_df = load_core_csv(core_file)
 st.sidebar.success(
     f"Core: {len(core_df)} data points, {core_df['WELL'].nunique()} wells")
+
+zone_df = None
+if zone_file:
+    try:
+        zone_df = read_zone_csv(zone_file)
+        st.sidebar.success(f"Zone: {len(zone_df)} intervals loaded")
+    except Exception as e:
+        st.sidebar.error(f"Gagal baca Zone CSV: {e}")
 
 well_data = {}
 for f in las_files:
@@ -1143,6 +1252,8 @@ with tab_results:
 
     for well in matching_wells:
         log_df = well_data[well]
+        log_df = merge_zone(log_df, zone_df)
+
         col_map = {c.upper(): c for c in log_df.columns}
         phie_actual = col_map.get(phie_col_opt.upper())
         sw_actual = col_map.get(sw_col_opt.upper())
@@ -1155,6 +1266,8 @@ with tab_results:
 
         well_core = core_df[core_df['WELL'] == well].copy()
         merged = merge_core_to_log(log_df, well_core, depth_tol=depth_tol)
+        if not merged.empty and 'ZONE' not in merged.columns:
+            merged = merge_zone(merged, zone_df)
 
         if len(merged) < 3:
             st.warning(
@@ -1163,41 +1276,57 @@ with tab_results:
             progress.progress(min(step / total, 1.0))
             continue
 
-        well_results = {}       # {method: best_result}
-        well_opt_detail = {}    # {method: {opt_name: result}}
+        well_results = {}       # {method_zone: best_result}
+        well_opt_detail = {}    # {method_zone: {opt_name: result}}
 
-        for method in methods_selected:
-            step += 1
-            progress.progress(min(step / total, 1.0))
+        zones_in_well = merged['ZONE'].unique() if 'ZONE' in merged.columns else [
+            'UNKNOWN']
 
-            opt_results, best_opt = optimise_method(
-                method,
-                merged[phie_actual],
-                merged[sw_actual],
-                merged['PERM_CORE'],
-                optimizers_selected,
-            )
+        for zone in zones_in_well:
+            z_merged = merged[merged['ZONE'] ==
+                              zone] if 'ZONE' in merged.columns else merged
+            if len(z_merged) < 3:
+                continue
 
-            if opt_results:
-                well_opt_detail[method] = opt_results
-                best_res = opt_results[best_opt].copy()
-                best_res['best_optimizer'] = best_opt
-                well_results[method] = best_res
+            for method in methods_selected:
+                step += (1 / len(zones_in_well)
+                         ) if len(zones_in_well) > 0 else 1
+                progress.progress(min(step / total, 1.0))
 
-            # Default comparison
-            if use_default:
-                info = METHOD_INFO[method]
-                def_res = eval_default(
+                opt_results, best_opt = optimise_method(
                     method,
-                    merged[phie_actual].values,
-                    merged[sw_actual].values,
-                    merged['PERM_CORE'].values,
-                    info['defaults'],
-                    f'{method} (Default)',
+                    z_merged[phie_actual],
+                    z_merged[sw_actual],
+                    z_merged['PERM_CORE'],
+                    optimizers_selected,
                 )
-                if def_res is not None:
-                    def_res['best_optimizer'] = 'Default'
-                    well_results[f'{method} (Default)'] = def_res
+
+                if opt_results:
+                    res_key = f"{method} [{zone}]" if zone != 'UNKNOWN' else method
+                    well_opt_detail[res_key] = opt_results
+                    best_res = opt_results[best_opt].copy()
+                    best_res['best_optimizer'] = best_opt
+                    best_res['zone'] = zone
+                    best_res['method'] = method
+                    well_results[res_key] = best_res
+
+                # Default comparison
+                if use_default:
+                    info = METHOD_INFO[method]
+                    def_res = eval_default(
+                        method,
+                        z_merged[phie_actual].values,
+                        z_merged[sw_actual].values,
+                        z_merged['PERM_CORE'].values,
+                        info['defaults'],
+                        f'{method} (Default)',
+                    )
+                    if def_res is not None:
+                        res_key_def = f"{method} (Default) [{zone}]" if zone != 'UNKNOWN' else f"{method} (Default)"
+                        def_res['best_optimizer'] = 'Default'
+                        def_res['zone'] = zone
+                        def_res['method'] = method
+                        well_results[res_key_def] = def_res
 
         if well_results:
             all_results[well] = {
@@ -1366,24 +1495,55 @@ with tab_results:
     export_well = st.selectbox("Pilih well", list(all_results.keys()))
     if export_well:
         wd = all_results[export_well]
-        opt_only = {k: v for k, v in results.items() if '(Default)' not in k}
-        if opt_only:
-            best_method = max(opt_only, key=lambda k: opt_only[k]['r2'])
-            best_params = opt_only[best_method]['params']
+        results_well = wd['results']
+        opt_only = {k: v for k, v in results_well.items()
+                    if '(Default)' not in k}
 
+        if opt_only:
             log_df_exp = wd['log_df'].copy()
             phie_full = log_df_exp[wd['phie_col']].values
             sw_full = log_df_exp[wd['sw_col']].values
-            perm_computed = compute_perm(
-                best_method, phie_full, sw_full, best_params)
-            log_df_exp['PERM_COMPUTED'] = perm_computed
-            log_df_exp['PERM_METHOD'] = best_method
 
-            csv2 = log_df_exp[['DEPTH', wd['phie_col'], wd['sw_col'],
-                               'PERM_COMPUTED', 'PERM_METHOD']].to_csv(index=False).encode('utf-8')
+            # Calculate PERM per zone using best method/params for that zone
+            perm_computed = np.full(len(log_df_exp), np.nan)
+
+            # Group by zone to apply per-zone optimal params
+            zones_exp = log_df_exp['ZONE'].unique() if 'ZONE' in log_df_exp.columns else [
+                'UNKNOWN']
+
+            for z in zones_exp:
+                z_mask = (log_df_exp['ZONE'] == z) if 'ZONE' in log_df_exp.columns else np.ones(
+                    len(log_df_exp), dtype=bool)
+                # Find best performing method for this specific zone
+                z_res_list = {k: v for k, v in opt_only.items()
+                              if v.get('zone') == z}
+                if not z_res_list:
+                    # Fallback to absolute best if zone-specific not found
+                    best_key = max(opt_only, key=lambda k: opt_only[k]['r2'])
+                    z_res = opt_only[best_key]
+                else:
+                    best_z_key = max(
+                        z_res_list, key=lambda k: z_res_list[k]['r2'])
+                    z_res = z_res_list[best_z_key]
+
+                z_method = z_res['method']
+                z_params = z_res['params']
+
+                ph_z = phie_full[z_mask]
+                sw_z = sw_full[z_mask]
+
+                if len(ph_z) > 0:
+                    perm_computed[z_mask] = compute_perm(
+                        z_method, ph_z, sw_z, z_params)
+
+            log_df_exp['PERM_COMPUTED'] = perm_computed
+
+            csv2 = log_df_exp[['DEPTH', 'ZONE', wd['phie_col'], wd['sw_col'],
+                               'PERM_COMPUTED']].to_csv(index=False).encode('utf-8')
             st.download_button(
-                f"⬇️ Download {export_well} — {best_method} (CSV)",
+                f"⬇️ Download {export_well} — Computed PERM (CSV)",
                 data=csv2,
-                file_name=f"perm_{export_well}_{best_method.replace(' ', '_')}.csv",
+                file_name=f"perm_computed_{export_well}.csv",
                 mime="text/csv",
+                help="Menggunakan parameter terbaik per zona yang telah dikalibrasi."
             )

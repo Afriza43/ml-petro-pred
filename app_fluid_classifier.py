@@ -666,9 +666,10 @@ def build_fluid_labels(df: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════
 # QC PIPELINE
 # ══════════════════════════════════════════════════════════════════
-def run_qc_pipeline(df, base_logs=('GR', 'RT', 'NPHI', 'RHOB'),
-                    use_iqual: bool = True):
-    """QC: drop all-NaN logs, RT≤0, IQUAL>0 filter, drop NaN label."""
+def run_qc_pipeline(df, base_logs=('GR', 'RT', 'NPHI', 'RHOB')):
+    """QC: drop all-NaN logs, koreksi RT≤0, simpan hanya baris berlabel fluid valid.
+    Filter kriteria: punya label FLUID huruf (G/O/W/GP/OP) atau FLUID_CODE valid
+    (bukan IQUAL > 0, karena label fluid lebih andal sebagai penanda data interpretasi)."""
     log = {}
     n0 = len(df)
     df = df.copy()
@@ -688,13 +689,7 @@ def run_qc_pipeline(df, base_logs=('GR', 'RT', 'NPHI', 'RHOB'),
     else:
         log['rt_invalid_to_nan'] = 0
 
-    if use_iqual and 'IQUAL' in df.columns:
-        before = len(df)
-        df = df[pd.to_numeric(df['IQUAL'], errors='coerce') > 0].copy()
-        log['drop_iqual_le_0'] = int(before - len(df))
-    else:
-        log['drop_iqual_le_0'] = 0
-
+    # Konversi label fluid (letter → code), lalu saring ke kode valid
     df = _coerce_fluid_label(df)
     before = len(df)
     df = df[df['FLUID_CODE'].notna()].copy()
@@ -1193,6 +1188,20 @@ def _track_fluid(values, depth, name='FLUID', color_map=None):
     )
 
 
+def _track_iqual(df, depth):
+    """Track IQUAL sebagai bar warna: 0=gelap, 1=kuning, 2=oranye, 3+=hijau."""
+    IQUAL_COLOR = {0: '#1c2128', 1: '#e3b341', 2: '#f0a500', 3: '#3fb950'}
+    iq = pd.to_numeric(df.get('IQUAL'), errors='coerce').fillna(0).astype(int)
+    colors = iq.map(lambda v: IQUAL_COLOR.get(min(v, 3), '#3fb950')).tolist()
+    return go.Bar(
+        x=[1] * len(df), y=depth, orientation='h', width=1.0,
+        marker=dict(color=colors, line=dict(width=0)),
+        showlegend=False,
+        hovertext=iq.astype(str), hoverinfo='text+y',
+        name='IQUAL',
+    )
+
+
 def plot_well_log(df: pd.DataFrame, well_name: str,
                   show_pred: bool = False) -> go.Figure:
     """
@@ -1200,7 +1209,7 @@ def plot_well_log(df: pd.DataFrame, well_name: str,
       Track 1: GR / GR_NORM
       Track 2: RHOB & NPHI
       Track 3: RT (log)
-      Track 4: LITHO_CODE
+      Track 4: IQUAL  (0=gelap · 1=kuning · 2=oranye · 3+=hijau)
       Track 5: FLUID Aktual
       Track 6: FLUID Prediksi (bila show_pred)
     """
@@ -1208,11 +1217,10 @@ def plot_well_log(df: pd.DataFrame, well_name: str,
     d = df['DEPTH'].values
 
     n_tracks = 5 + (1 if show_pred else 0)
-    titles = ['GR / GR_NORM', 'RHOB / NPHI',
-              'RT (log)', 'LITHO', 'FLUID Aktual']
+    titles = ['GR / GR_NORM', 'RHOB / NPHI', 'RT (log)', 'IQUAL', 'FLUID Aktual']
     if show_pred:
         titles.append('FLUID Prediksi')
-    widths = [1.2, 1.2, 1.0, 0.4, 0.4] + ([0.4] if show_pred else [])
+    widths = [1.2, 1.2, 1.0, 0.35, 0.35] + ([0.35] if show_pred else [])
 
     fig = make_subplots(rows=1, cols=n_tracks, shared_yaxes=True,
                         column_widths=widths, subplot_titles=titles,
@@ -1242,9 +1250,8 @@ def plot_well_log(df: pd.DataFrame, well_name: str,
                       row=1, col=3)
         fig.update_xaxes(type='log', row=1, col=3)
 
-    tr_litho = _track_litho(df, d)
-    if tr_litho is not None:
-        fig.add_trace(tr_litho, row=1, col=4)
+    # Track 4: IQUAL (gantikan LITHO)
+    fig.add_trace(_track_iqual(df, d), row=1, col=4)
     fig.update_xaxes(showticklabels=False, range=[0, 1], row=1, col=4)
 
     if 'FLUID_LETTER' in df.columns:
@@ -1535,13 +1542,15 @@ with st.sidebar:
     # 03 QC
     st.markdown('<div class="sec">03 · QC Pipeline</div>',
                 unsafe_allow_html=True)
-    use_iqual_filter = st.checkbox("Filter IQUAL > 0", value=True,
-                                   help="Baris tanpa IQUAL > 0 dianggap tidak punya label fluid.")
+    st.markdown(
+        '<div class="ibox">Filter kriteria: hanya baris yang punya label fluid valid '
+        '(G / O / W / GP / OP). Tidak menggunakan IQUAL sebagai filter.</div>',
+        unsafe_allow_html=True)
     qc_btn = st.button("🧹 Jalankan QC",
                        disabled=combined_raw is None,
                        use_container_width=True)
     if qc_btn and combined_raw is not None:
-        df_qc, ql = run_qc_pipeline(combined_raw, use_iqual=use_iqual_filter)
+        df_qc, ql = run_qc_pipeline(combined_raw)
         st.session_state['combined_df'] = df_qc
         st.session_state['qc_log'] = ql
         st.session_state['normalized'] = False
@@ -1552,11 +1561,10 @@ with st.sidebar:
         ql = st.session_state['qc_log']
         st.markdown(
             f'<div class="ibox">'
-            f'Drop all-NaN logs : <b>{ql.get("drop_all_nan_logs",0):,}</b><br>'
-            f'RT invalid → NaN  : <b>{ql.get("rt_invalid_to_nan",0):,}</b><br>'
-            f'Drop IQUAL ≤ 0    : <b>{ql.get("drop_iqual_le_0",0):,}</b><br>'
-            f'Drop FLUID NaN    : <b>{ql.get("drop_fluid_label_nan",0):,}</b><br>'
-            f'Drop kode fluid asing: <b>{ql.get("drop_fluid_unknown_code",0):,}</b><br>'
+            f'Drop all-NaN logs  : <b>{ql.get("drop_all_nan_logs",0):,}</b><br>'
+            f'RT invalid → NaN   : <b>{ql.get("rt_invalid_to_nan",0):,}</b><br>'
+            f'Drop no fluid label: <b>{ql.get("drop_fluid_label_nan",0):,}</b><br>'
+            f'Drop kode asing    : <b>{ql.get("drop_fluid_unknown_code",0):,}</b><br>'
             f'<b>Total drop: {ql.get("total_dropped",0):,} · Sisa: {ql.get("remaining",0):,}</b>'
             f'</div>', unsafe_allow_html=True)
 
@@ -2000,6 +2008,64 @@ with tabs[5]:
                 if not cnt_p.empty:
                     st.markdown("**Distribusi FLUID Prediksi di tampilan:** " +
                                 " · ".join([f"{k}={v}" for k, v in cnt_p.items()]))
+
+            # ── Diagnostik: kenapa prediksi kosong padahal ada label aktual ──
+            if show_pred and 'FLUID_CLASS3' in df_well.columns:
+                labeled = df_well['FLUID_CLASS3'].notna()
+                no_pred = df_well['FLUID_PRED_3'].isna() | (df_well['FLUID_PRED_3'] == 'HC')
+                problem_rows = df_well[labeled & no_pred]
+
+                if not problem_rows.empty:
+                    with st.expander(
+                        f"⚠ {len(problem_rows)} titik berlabel TANPA prediksi lengkap "
+                        f"— klik untuk diagnosis", expanded=False):
+                        st.markdown(
+                            '<div class="ibox">Kemungkinan penyebab prediksi kosong:<br>'
+                            '1. <b>Feature NaN</b> — salah satu log predictor NaN '
+                            'di titik tersebut → model skip prediksi.<br>'
+                            '2. <b>Stage-1 salah klasifikasi</b> — titik O/G di-predict '
+                            'sebagai W oleh Stage-1, sehingga Stage-2 tidak dijalankan '
+                            '→ FLUID_PRED_3 = W (bukan kosong) tapi salah.<br>'
+                            '3. <b>Stage-2 belum dilatih</b> — titik HC dari Stage-1 '
+                            'tidak bisa dipecah O/G → sementara tampil sebagai "HC".<br>'
+                            'Kolom <b>miss_reason</b> menjelaskan alasan per baris.</div>',
+                            unsafe_allow_html=True)
+
+                        s1_res_d = st.session_state.get('fc_s1_results')
+                        s2_res_d = st.session_state.get('fc_s2_results')
+                        diag_rows = []
+                        for _, row in problem_rows.iterrows():
+                            reason_parts = []
+                            # Cek fitur NaN per stage
+                            if s1_res_d:
+                                nan_s1 = [f for f in s1_res_d['features']
+                                          if f in df_well.columns
+                                          and pd.isna(row.get(f))]
+                                if nan_s1:
+                                    reason_parts.append(
+                                        f"NaN features S1: {', '.join(nan_s1)}")
+                            if s2_res_d:
+                                nan_s2 = [f for f in s2_res_d['features']
+                                          if f in df_well.columns
+                                          and pd.isna(row.get(f))]
+                                if nan_s2:
+                                    reason_parts.append(
+                                        f"NaN features S2: {', '.join(nan_s2)}")
+                            s1p = row.get('HC_W_PRED', pd.NA)
+                            if str(s1p) == 'W' and row.get('FLUID_CLASS3') in ('O', 'G'):
+                                reason_parts.append("S1 misclassified → W")
+                            if not reason_parts:
+                                reason_parts.append("Stage-2 belum dilatih / prediksi HC")
+                            diag_rows.append({
+                                'DEPTH': row.get('DEPTH'),
+                                'FLUID_ACTUAL': row.get('FLUID_CLASS3'),
+                                'HC_W_PRED': str(s1p),
+                                'OG_PRED': str(row.get('OG_PRED', pd.NA)),
+                                'FLUID_PRED_3': str(row.get('FLUID_PRED_3', pd.NA)),
+                                'miss_reason': ' | '.join(reason_parts),
+                            })
+                        st.dataframe(pd.DataFrame(diag_rows),
+                                     use_container_width=True, hide_index=True)
 
 # ──────────────────────────────────────────────────────────────────
 # TAB 7 — Export
