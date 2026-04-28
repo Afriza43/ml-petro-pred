@@ -27,6 +27,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import os
 import zipfile
 import json
 import pickle
@@ -2296,91 +2297,294 @@ def _run_multi_structure_page():
     SS = st.session_state
     structs = SS['structures']  # {name: {wells, zone_df, zip_hash, zone_hash}}
 
+    # ── Folder-based loader helper ──────────────────────────────────────────
+    _DATA_STRUCTS_DIR = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'data_structures')
+
+    def _scan_structure_folders():
+        """Kembalikan dict {nama_folder: {zip_path, zone_path, marker_path}}."""
+        found = {}
+        if not os.path.isdir(_DATA_STRUCTS_DIR):
+            return found
+        for entry in sorted(os.scandir(_DATA_STRUCTS_DIR), key=lambda e: e.name):
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            zips = sorted([f.path for f in os.scandir(entry.path)
+                           if f.is_file() and f.name.lower().endswith('.zip')])
+            csvs = sorted([f.path for f in os.scandir(entry.path)
+                           if f.is_file() and f.name.lower().endswith('.csv')
+                           and 'marker' not in f.name.lower()])
+            markers = sorted([f.path for f in os.scandir(entry.path)
+                              if f.is_file() and f.name.lower().endswith('.csv')
+                              and 'marker' in f.name.lower()])
+            if zips:
+                found[name] = {
+                    'zip_path': zips[0],
+                    'zone_path': csvs[0] if csvs else None,
+                    'marker_path': markers[0] if markers else None,
+                }
+        return found
+
+    def _load_structure_from_folder(folder_entry):
+        """Load satu struktur dari dict {zip_path, zone_path, marker_path}."""
+        import hashlib
+        zp = folder_entry['zip_path']
+        with open(zp, 'rb') as f:
+            zb = f.read()
+        zhash = hashlib.md5(zb).hexdigest()
+        wells = load_zip_cached(zb)
+        zone_df = None
+        zone_hash = None
+        marker_df = None
+        if folder_entry.get('zone_path'):
+            try:
+                with open(folder_entry['zone_path'], 'rb') as f:
+                    zone_bytes = f.read()
+                zone_df = read_zone_csv(io.BytesIO(zone_bytes))
+                zone_hash = hashlib.md5(zone_bytes).hexdigest()
+            except Exception:
+                pass
+        if folder_entry.get('marker_path'):
+            try:
+                marker_df = pd.read_csv(folder_entry['marker_path'])
+            except Exception:
+                pass
+        return zb, zhash, wells, zone_df, zone_hash, marker_df
+
     # ── SIDEBAR ──
     with st.sidebar:
         st.markdown('<div class="sec">01 · Tambah Struktur</div>',
                     unsafe_allow_html=True)
 
-        struct_name = st.text_input(
-            "Nama Struktur", value="", key='ms_struct_name',
-            help="Contoh: BN, MJ, TMB — nama field/area")
+        # ── Mode pilih: Upload atau Load dari Folder ──
+        add_mode = st.radio(
+            "Sumber Data",
+            ["📤 Upload ZIP", "📁 Load dari Folder"],
+            horizontal=True, key='ms_add_mode',
+            help="'Load dari Folder' membaca dari folder data_structures/ "
+                 "di direktori yang sama dengan app ini.")
 
-        ms_zip = st.file_uploader("ZIP berisi LAS", type=['zip'],
-                                  key='ms_zip_up')
-        ms_zone = st.file_uploader("Zone CSV (opsional)", type=['csv'],
-                                   key='ms_zone_up')
-        ms_marker = st.file_uploader("Marker CSV (opsional)", type=['csv'],
-                                     key='ms_marker_up')
-
-        add_btn = st.button("➕  Tambah Struktur",
-                            disabled=(not struct_name or not ms_zip),
-                            use_container_width=True, key='ms_add_btn')
-
-        if add_btn and struct_name and ms_zip:
-            sname = struct_name.strip().upper()
-            zb = ms_zip.read()
-            zhash = hashlib.md5(zb).hexdigest()
-
-            # Cek duplikat
-            existing = structs.get(sname, {})
-            if existing.get('zip_hash') == zhash:
-                st.info(f"ℹ Struktur {sname} sudah ada dengan ZIP yang sama.")
+        if add_mode == "📁 Load dari Folder":
+            avail_folders = _scan_structure_folders()
+            if not avail_folders:
+                st.info(
+                    f"Belum ada subfolder di `data_structures/`. "
+                    f"Buat subfolder per struktur dan masukkan ZIP + CSV ke dalamnya.")
             else:
-                with st.spinner(f"Membaca LAS dari {sname}..."):
-                    wells = load_zip_cached(zb)
-                if not wells:
-                    st.error(f"❌ Tidak ada LAS valid di ZIP {sname}")
-                else:
-                    # Tambah prefix struktur ke nama sumur
-                    tagged_wells = {}
-                    for wn, df in wells.items():
-                        df = df.copy()
-                        df['STRUCTURE'] = sname
-                        tagged_wells[f"{sname}::{wn}"] = df
-                    entry = {
-                        'wells': tagged_wells,
-                        'zone_df': None,
-                        'marker_df': None,
-                        'zip_hash': zhash,
-                        'zone_hash': None,
-                        'n_wells': len(wells),
-                        'well_names': sorted(wells.keys()),
-                    }
-                    # Zone CSV
-                    if ms_zone is not None:
-                        try:
-                            zone_bytes = ms_zone.read()
-                            entry['zone_df'] = read_zone_csv(
-                                io.BytesIO(zone_bytes))
-                            entry['zone_hash'] = hashlib.md5(
-                                zone_bytes).hexdigest()
-                        except Exception as e:
-                            st.warning(f"⚠ Zone CSV error untuk {sname}: {e}")
-                    # Marker CSV
-                    if ms_marker is not None:
-                        try:
-                            marker_bytes = ms_marker.read()
-                            entry['marker_df'] = pd.read_csv(
-                                io.BytesIO(marker_bytes))
-                        except Exception as e:
-                            st.warning(
-                                f"⚠ Marker CSV error untuk {sname}: {e}")
+                st.markdown(f"**{len(avail_folders)} struktur tersedia:**")
+                checked = {}
+                for fname in avail_folders:
+                    fe = avail_folders[fname]
+                    has_zone = "✓ Zone" if fe['zone_path'] else "—"
+                    already = fname.upper() in structs
+                    label = f"{fname} {'*(loaded)*' if already else ''}"
+                    checked[fname] = st.checkbox(
+                        label,
+                        value=already,
+                        key=f'ms_folder_ck_{fname}',
+                        help=f"ZIP: {os.path.basename(fe['zip_path'])} | {has_zone}")
 
-                    structs[sname] = entry
+                folder_load_btn = st.button(
+                    "📥 Load Struktur Terpilih",
+                    use_container_width=True, key='ms_folder_load_btn',
+                    type='primary')
+
+                if folder_load_btn:
+                    selected = [fn for fn, ck in checked.items() if ck]
+                    # Hapus struktur yang di-uncheck
+                    to_remove = [
+                        fn.upper() for fn in avail_folders
+                        if not checked.get(fn, False) and fn.upper() in structs]
+                    for rm in to_remove:
+                        del structs[rm]
+
+                    n_loaded = 0
+                    for fname in selected:
+                        sname = fname.upper()
+                        fe = avail_folders[fname]
+                        with st.spinner(f"Membaca {sname}..."):
+                            try:
+                                import hashlib
+                                zb, zhash, wells, zone_df, zone_hash, marker_df = \
+                                    _load_structure_from_folder(fe)
+                            except Exception as ex:
+                                st.error(f"❌ Gagal load {sname}: {ex}")
+                                continue
+                        if not wells:
+                            st.error(f"❌ Tidak ada LAS valid di ZIP {sname}")
+                            continue
+                        # Skip jika hash sama (tidak berubah)
+                        existing = structs.get(sname, {})
+                        if existing.get('zip_hash') == zhash and \
+                                existing.get('zone_hash') == zone_hash:
+                            n_loaded += 1
+                            continue
+                        tagged_wells = {}
+                        for wn, df in wells.items():
+                            df = df.copy()
+                            df['STRUCTURE'] = sname
+                            tagged_wells[f"{sname}::{wn}"] = df
+                        structs[sname] = {
+                            'wells': tagged_wells,
+                            'zone_df': zone_df,
+                            'marker_df': marker_df,
+                            'zip_hash': zhash,
+                            'zone_hash': zone_hash,
+                            'n_wells': len(wells),
+                            'well_names': sorted(wells.keys()),
+                            'source': 'folder',
+                            'folder_name': fname,
+                        }
+                        n_loaded += 1
+
                     SS['structures'] = structs
-                    # Reset downstream
                     SS['ms_combined_df'] = None
                     SS['ms_qc_log'] = None
                     SS['ms_normalized'] = False
                     SS['ms_gr_norm_params'] = {}
                     SS['ms_results'] = None
                     SS['ms_trained'] = False
-                    st.success(f"✅ {sname}: {len(wells)} sumur ditambahkan")
+                    st.success(
+                        f"✅ {n_loaded} struktur dimuat "
+                        f"({len(to_remove)} dihapus)" if to_remove
+                        else f"✅ {n_loaded} struktur dimuat")
+                    st.rerun()
+
+        else:
+            # ── Mode Upload (existing behavior) ──
+            struct_name = st.text_input(
+                "Nama Struktur", value="", key='ms_struct_name',
+                help="Contoh: BN, MJ, TMB — nama field/area")
+
+            ms_zip = st.file_uploader("ZIP berisi LAS", type=['zip'],
+                                      key='ms_zip_up')
+            ms_zone = st.file_uploader("Zone CSV (opsional)", type=['csv'],
+                                       key='ms_zone_up')
+            ms_marker = st.file_uploader("Marker CSV (opsional)", type=['csv'],
+                                         key='ms_marker_up')
+
+            add_btn = st.button("➕  Tambah Struktur",
+                                disabled=(not struct_name or not ms_zip),
+                                use_container_width=True, key='ms_add_btn')
+
+            if add_btn and struct_name and ms_zip:
+                sname = struct_name.strip().upper()
+                zb = ms_zip.read()
+                zhash = hashlib.md5(zb).hexdigest()
+
+                existing = structs.get(sname, {})
+                if existing.get('zip_hash') == zhash:
+                    st.info(f"ℹ Struktur {sname} sudah ada dengan ZIP yang sama.")
+                else:
+                    with st.spinner(f"Membaca LAS dari {sname}..."):
+                        wells = load_zip_cached(zb)
+                    if not wells:
+                        st.error(f"❌ Tidak ada LAS valid di ZIP {sname}")
+                    else:
+                        tagged_wells = {}
+                        for wn, df in wells.items():
+                            df = df.copy()
+                            df['STRUCTURE'] = sname
+                            tagged_wells[f"{sname}::{wn}"] = df
+                        entry = {
+                            'wells': tagged_wells,
+                            'zone_df': None,
+                            'marker_df': None,
+                            'zip_hash': zhash,
+                            'zone_hash': None,
+                            'n_wells': len(wells),
+                            'well_names': sorted(wells.keys()),
+                            'source': 'upload',
+                        }
+                        if ms_zone is not None:
+                            try:
+                                zone_bytes = ms_zone.read()
+                                entry['zone_df'] = read_zone_csv(
+                                    io.BytesIO(zone_bytes))
+                                entry['zone_hash'] = hashlib.md5(
+                                    zone_bytes).hexdigest()
+                            except Exception as e:
+                                st.warning(f"⚠ Zone CSV error untuk {sname}: {e}")
+                        if ms_marker is not None:
+                            try:
+                                marker_bytes = ms_marker.read()
+                                entry['marker_df'] = pd.read_csv(
+                                    io.BytesIO(marker_bytes))
+                            except Exception as e:
+                                st.warning(f"⚠ Marker CSV error untuk {sname}: {e}")
+
+                        structs[sname] = entry
+                        SS['structures'] = structs
+                        SS['ms_combined_df'] = None
+                        SS['ms_qc_log'] = None
+                        SS['ms_normalized'] = False
+                        SS['ms_gr_norm_params'] = {}
+                        SS['ms_results'] = None
+                        SS['ms_trained'] = False
+                        st.success(f"✅ {sname}: {len(wells)} sumur ditambahkan")
 
         # ── Daftar struktur ──
         if structs:
             st.markdown('<div class="sec">Struktur Aktif</div>',
                         unsafe_allow_html=True)
+
+            # Tombol refresh untuk struktur dari folder (reload jika file berubah)
+            folder_structs = [s for s, d in structs.items()
+                              if d.get('source') == 'folder']
+            if folder_structs:
+                if st.button("🔄 Refresh dari Folder", use_container_width=True,
+                             key='ms_refresh_folder',
+                             help="Reload ulang struktur dari folder jika ada file yang diubah"):
+                    avail_now = _scan_structure_folders()
+                    for sname in list(structs.keys()):
+                        if structs[sname].get('source') != 'folder':
+                            continue
+                        fname = structs[sname].get('folder_name', sname)
+                        fe = avail_now.get(fname)
+                        if fe is None:
+                            continue
+                        import hashlib as _hl
+                        with open(fe['zip_path'], 'rb') as f:
+                            new_zb = f.read()
+                        new_zhash = _hl.md5(new_zb).hexdigest()
+                        if new_zhash == structs[sname].get('zip_hash'):
+                            continue
+                        wells = load_zip_cached(new_zb)
+                        if not wells:
+                            continue
+                        tagged = {}
+                        for wn, df in wells.items():
+                            df = df.copy()
+                            df['STRUCTURE'] = sname
+                            tagged[f"{sname}::{wn}"] = df
+                        zone_df, zone_hash, marker_df = None, None, None
+                        if fe.get('zone_path'):
+                            try:
+                                with open(fe['zone_path'], 'rb') as f:
+                                    zb2 = f.read()
+                                zone_df = read_zone_csv(io.BytesIO(zb2))
+                                zone_hash = _hl.md5(zb2).hexdigest()
+                            except Exception:
+                                pass
+                        if fe.get('marker_path'):
+                            try:
+                                marker_df = pd.read_csv(fe['marker_path'])
+                            except Exception:
+                                pass
+                        structs[sname].update({
+                            'wells': tagged, 'zone_df': zone_df,
+                            'marker_df': marker_df, 'zip_hash': new_zhash,
+                            'zone_hash': zone_hash,
+                            'n_wells': len(wells),
+                            'well_names': sorted(wells.keys()),
+                        })
+                    SS['structures'] = structs
+                    SS['ms_combined_df'] = None
+                    SS['ms_trained'] = False
+                    st.success("✅ Folder struktur di-refresh")
+                    st.rerun()
+
             for sname, sdata in structs.items():
                 c1, c2 = st.columns([4, 1])
                 with c1:
@@ -2389,9 +2593,10 @@ def _run_multi_structure_page():
                         wells_str += f' +{len(sdata["well_names"])-5}'
                     zone_tag = '✓ Zone' if sdata.get(
                         'zone_df') is not None else '—'
+                    src_icon = '📁' if sdata.get('source') == 'folder' else '📤'
                     st.markdown(
                         f'<div class="ibox" style="padding:5px 10px;">'
-                        f'<b>{sname}</b> · {sdata["n_wells"]} sumur · {zone_tag}<br>'
+                        f'{src_icon} <b>{sname}</b> · {sdata["n_wells"]} sumur · {zone_tag}<br>'
                         f'<span style="font-size:.65rem;color:var(--muted2);">{wells_str}</span>'
                         f'</div>', unsafe_allow_html=True)
                 with c2:
